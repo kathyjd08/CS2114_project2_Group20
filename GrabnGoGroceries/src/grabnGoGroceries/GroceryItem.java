@@ -1,4 +1,4 @@
-package grabnNGoGroceries;
+package grabnGoGroceries;
 
 import java.util.Objects;
 

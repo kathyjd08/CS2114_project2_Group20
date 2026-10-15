@@ -1,4 +1,4 @@
-package grabnNGoGroceries;
+package grabnGoGroceries;
 
 /**
  * A generic chain of linked nodes. Use it as the storage inside your

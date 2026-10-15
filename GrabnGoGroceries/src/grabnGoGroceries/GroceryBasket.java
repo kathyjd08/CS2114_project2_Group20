@@ -1,4 +1,4 @@
-package grabnNGoGroceries;
+package grabnGoGroceries;
 
 /** A shopping basket stored in a generic LinkedChain of GroceryItem. */
 public class GroceryBasket {

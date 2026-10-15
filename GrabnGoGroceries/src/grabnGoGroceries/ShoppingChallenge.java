@@ -1,4 +1,4 @@
-package grabnNGoGroceries;
+package grabnGoGroceries;
 
 /** A challenge with a maximum budget and minimum item count. */
 public class ShoppingChallenge {
