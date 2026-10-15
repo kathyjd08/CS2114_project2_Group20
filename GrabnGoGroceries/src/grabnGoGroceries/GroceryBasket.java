@@ -35,6 +35,11 @@ public class GroceryBasket {
         return null;
     }
 
+public GroceryItem[] getItems() {
+    return items.toArray(new GroceryItem[items.size()]);
+}
+
+
     public int getItemCount() {
         return items.size();
     }
