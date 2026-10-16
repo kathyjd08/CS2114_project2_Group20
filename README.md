@@ -23,4 +23,4 @@ Nikita -- Primary class functions
 Aleysa -- Interlinking each class
 Kevin --  Program testing and reflection
 Kathy --  GitHub setup, Next-Steps, and Attributions
-AI Statement: All thoughts and ideas present are each individual member's intellectual property, AI was used in the organizational phases, the , and . We as a group have made sure to understand and self-verify all work is our own and adheres to our own personal rubric
+AI Statement: All thoughts and ideas present are each individual member's intellectual property, AI was used in the organizational phases, the structuring of our code, and to verify GitHub and eclipse were set up to work together properly. We as a group have made sure to understand all processes and self-verify all work is our own and adheres to our own personal rubric.
