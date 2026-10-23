@@ -1,26 +1,229 @@
-# CS2114_project_Group20
-This is the repository for the Grab n Go Groceries app, a text based app that gives you a budgeting challenge and tracks your groceries.
-# Reflection
-1. What changed from your specification?
-Our project retained the same basic concept, although a number of modifications were made during the development of our prototype. The original design was based on manually entering grocery items, but we have incorporated a preset grocery list based on aisles, as well as the ability to search. Budgeting, checkout with tax estimation, saving progress, and grading the shopping games have been included as additional features. There were some changes to method signatures, with the original GroceryApp() constructor being replaced with the GroceryApp(Scanner, File) constructors, and the method for adding items being split up into browseAisles(), addCustomItem(), and addToBasket(). As originally planned, input validation occurs mostly in the GroceryApp class, although input validation has been done in other classes to ensure that there are no invalid object references or nulls.
-2. What changed in the LinkedChain?
-LinkedChain was used in its provided form without changing the core functionality. Initially, our description of a linked chain implied a reference to both the head and the tail nodes, where the add() operation would add elements at the end of the chain in constant time. The provided implementation, however, uses a first-node reference and a counter, and the add() operation adds elements at the beginning. In order to maintain the order of added grocery items, we used the existing addToEnd() function from GroceryBasket. We additionally used remove(), size(), isEmpty(), get(), and toArray() functions for handling grocery items and challenges. This enabled us to confine the responsibilities of LinkedChain to storing objects, while the rest of grocery operations remained in GroceryBasket.
-3. What happened to your unknowns?
-In Deliverable 1, we highlighted four key uncertainties related to the elimination of duplicates, usage of LinkedChain generically, incorrect user input, and the use of coupons. We determined that removing an element means removing one copy only as opposed to removing all duplicates. Additionally, we discovered how to utilize LinkedChain in combination with different object types, such as GroceryItem and ShoppingChallenge, without requiring additional data structures. In terms of incorrect inputs, we implemented methods that will show an error message and prompt a user to retry for choosing the incorrect menu option, inputting an empty name, and providing invalid price. As for the last uncertainty related to the usage of coupons, it is still unresolved as it was initially planned to be implemented as a stretch goal. The question is how to discount a certain item and what will happen to the overall price as a result.
-4. What doesn't work yet?
-All of the major MVP features have been implemented in this iteration of the code. This includes adding and removing groceries, showing the basket, counting the groceries, computing the price, and exiting the application. Furthermore, all the Java files compile without issues. But there are some aspects which need to be improved upon. One of those aspects is that even though the program states that users are able to type in "Q" to exit the program from any menu, this functionality is inconsistent when it comes to certain input prompts. We also observed that after the user fails a shopping challenge, any changes made to the basket will not update the grading if the challenge is not restarted. The search functionality, at this time, only searches through the predefined grocery list and does not support searching the custom list. Although our specification contains testing for duplicates, invalid inputs, empty baskets, and completing the challenges, we have not included test classes in this prototype yet.
-# Next Steps
-1. What is left to finish MVP?
-The final step before completing our minimum viable product (MVP) is implementing and running JUnit test cases. Our core functions are complete, including browsing and searching for groceries, managing the basket, setting a budget, completing shopping challenges, checking out, and saving progress. However, the quitting functionality still has an issue that needs to be addressed. Our program is divided into five main classes: GroceryApp, GroceryBasket, GroceryItem, ShoppingChallenge, and LinkedChain. JUnit testing will help us verify that these classes work correctly and identify any remaining issues before the MVP is finalized.
-2. Which stretch goals will you attempt?
-One stretch goal we plan to implement is a coupon system that uses the existing generic LinkedChain class to store available coupons. Coupons could affect shopping challenges by reducing the total cost of a basket, potentially allowing users to meet a challenge's budget requirements. This would require modifications to the ShoppingChallenge class to account for coupon discounts when determining whether a challenge has been completed.
-3. What new test cases will you need?
-After completing our MVP test cases, we will need to implement test cases for the coupon item. There would need to be a another JUnit test class written to include testing for a price change, a budget modification, the ability to add a coupon in the shopping challenge without it catching as a grocery item, a catch if the coupon entered is null or an invalid value; an in valid value could be a coupon that exceeds the value of the cart, a negative number, 0, or an incorrectly formatted entry. There will probably be a divide between item specific coupons and general coupons which will impact the budget even more.
-4. Who does what?
-Kathy will take the task of writing the jUnit tests for all current classes. All group members will contribute to the slideshow. Aleysa will work on the coupon system. Kevin will tackle the 'Q' input issue described in our reflection. Nikita will verify our solutions as appointed group leader and make sure the coupon section runs as intended. Plans may change, this is not a concrete workload split.
-# Attribution
-Nikita -- Primary class functions
-Aleysa -- Interlinking each class
-Kevin --  Program testing and reflection
-Kathy --  GitHub setup, Next-Steps, and Attributions
-AI Statement: All thoughts and ideas present are each individual member's intellectual property, AI was used in the organizational phases, the structuring of our code, and to verify GitHub and eclipse were set up to work together properly. We as a group have made sure to understand all processes and self-verify all work is our own and adheres to our own personal rubric.
+# Grab n’ Go Groceries
+## CS 2114 — Project 2: Building for Reuse — Group 20
+
+Grab n’ Go Groceries is a Java console application for managing a grocery basket and completing shopping challenges within a budget.
+
+**Team:** Nikita Polstyanko, Kathy, Aleysa, and Miller
+
+**Repository:** https://github.com/kathyjd08/CS2114_project2_Group20
+
+## Features
+
+- Browse a predefined grocery catalog organized by aisle.
+- Search the catalog and add custom grocery items.
+- Add and remove groceries, including duplicate items.
+- View quantities, item counts, and the basket total.
+- Set a budget and track remaining spending.
+- Complete shopping challenges with item and budget requirements.
+- Submit a basket for challenge scoring and feedback.
+- Undo basket changes.
+- Check out with a tax estimate and view order history.
+- Save and restore progress.
+- Receive feedback for invalid menu entries and invalid custom-item input.
+
+## Project Structure
+
+Source code and JUnit tests are located in:
+
+`GrabnGoGroceries/src/grabnGoGroceries/`
+
+| Class | Responsibility |
+|---|---|
+| `GroceryApp` | Runs the console interface and coordinates input validation, browsing, searching, budgeting, challenges, checkout, saving, and history. |
+| `GroceryBasket` | Manages grocery items and provides adding, removing, searching, counting, totaling, and snapshot operations. |
+| `GroceryItem` | Represents a grocery product with a name, price, category, and description. |
+| `ShoppingChallenge` | Stores challenge requirements and checks whether a basket meets its minimum item count and maximum budget. |
+| `LinkedChain<T>` | Provides reusable generic linked storage through its public API. |
+
+`GroceryApp` contains three private static helper classes:
+
+- `Line`: represents a grocery item and its quantity for basket display.
+- `Grade`: stores challenge scoring information.
+- `Order`: stores information about a completed checkout.
+
+`LinkedChain<T>` contains a private static `Node<E>` class. Each node stores one entry and a reference to the next node.
+
+## Generic LinkedChain Reuse
+
+The application reuses one generic `LinkedChain<T>` implementation with multiple element types.
+
+The two main examples are:
+
+```java
+// In GroceryBasket:
+private LinkedChain<GroceryItem> items;
+
+// In GroceryApp:
+private final LinkedChain<ShoppingChallenge> challenges;
+```
+
+The same storage implementation therefore supports both grocery products and shopping challenges.
+
+The application also uses:
+
+- `LinkedChain<LinkedChain<GroceryItem>>` for undo snapshots.
+- `LinkedChain<Order>` for order history.
+- Temporary chains containing `GroceryItem`, `Line`, `String`, or `Integer` values.
+
+Application classes use the chain’s public methods, including `add`, `addToEnd`, `remove`, `get`, `count`, and `size`. They do not access its private nodes.
+
+`LinkedChain<T>` handles storing and retrieving entries. Grocery rules, budget calculations, and challenge scoring remain in the application classes.
+
+## System Diagram
+
+![Grab n’ Go Groceries system diagram](SystemDiagram12.png)
+
+## Requirements
+
+- Java Development Kit (JDK) 8 or later.
+- Eclipse with Java development support, if following the Eclipse instructions.
+- JUnit 4 for running the tests.
+
+The committed Eclipse configuration references these files relative to the `GrabnGoGroceries` project folder:
+
+- `lib/junit-4.13.2.jar`
+- `lib/hamcrest-core-1.3.jar`
+
+If these JAR files are not present, use Eclipse’s JUnit 4 library as described below.
+
+## Compile and Run in Eclipse
+
+1. Clone or download this repository.
+2. In Eclipse, select **File → Import → General → Existing Projects into Workspace**.
+3. Select the repository’s `GrabnGoGroceries` folder as the project root and import that Java project.
+4. Ensure an installed JDK is configured for the project.
+5. Open **Project → Properties → Java Build Path → Libraries**.
+6. If the JUnit and Hamcrest entries are marked as missing, remove those missing entries.
+7. Choose **Add Library → JUnit → JUnit 4** and apply the changes.
+8. Select **Project → Clean** and rebuild the project. If automatic building is disabled, select **Project → Build Project**.
+9. Open `src/grabnGoGroceries/GroceryApp.java`.
+10. Run it as a **Java Application**.
+11. Enter commands in the Eclipse Console.
+
+The application displays its menu when it starts. Enter `help` to see available commands and shortcuts.
+
+## Compile and Run from a Terminal
+
+These commands compile the application classes without compiling the JUnit test files.
+
+From the repository root:
+
+```sh
+cd GrabnGoGroceries
+mkdir out
+javac -d out src/grabnGoGroceries/GroceryApp.java src/grabnGoGroceries/GroceryBasket.java src/grabnGoGroceries/GroceryItem.java src/grabnGoGroceries/ShoppingChallenge.java src/grabnGoGroceries/LinkedChain.java
+java -cp out grabnGoGroceries.GroceryApp
+```
+
+If the `out` directory already exists, skip the `mkdir out` command.
+
+By default, the application saves progress to `.grabngo_save.properties` in the user’s home directory.
+
+To use a different save file:
+
+```sh
+java -Dgrocery.save=demo-save.properties -cp out grabnGoGroceries.GroceryApp
+```
+
+## Run the JUnit Tests
+
+Configure JUnit 4 using the Eclipse setup instructions above.
+
+Select the `grabnGoGroceries` package under `src` and run it as a **JUnit Test** to run the project’s tests.
+
+| Test class | Main area tested |
+|---|---|
+| `GroceryAppTest` | Console flows, commands, input validation, challenges, checkout, saving, and restoring progress. |
+| `GroceryBasketTest` | Basket operations, duplicates, item lookup, snapshots, restoration, and invalid arguments. |
+| `GroceryItemTest` | Item properties, equality, hash codes, and string output. |
+| `ShoppingChallengeTest` | Challenge requirements, invalid settings, and basket completion checks. |
+| `LinkedChainTest` | Generic storage operations, invalid inputs, and reuse with different element types. |
+
+A successful full run should report zero failures and zero errors. Run the entire suite after making code changes.
+
+## Input Handling and Design Decisions
+
+- Invalid menu entries produce feedback so the user can continue.
+- Custom-item input is checked before an item is added.
+- Adding a null item to a basket is rejected.
+- Invalid basket indexes are rejected.
+- Challenge settings require a valid name, a positive finite budget, and a minimum item count of at least one.
+- Duplicate groceries are allowed. Removing a matching item removes one occurrence.
+- Empty baskets can be displayed and checked.
+- The console interface handles user input, while model methods enforce their own argument requirements.
+
+## Changes from the Specification and Prototype
+
+The original specification focused on manually entering grocery items and managing a basket. The implementation added a predefined catalog organized by aisle and catalog searching to make shopping faster.
+
+Additional functionality includes budgeting, checkout with a tax estimate, saved progress, undo, order history, and challenge grading.
+
+The application’s constructors accept a `Scanner`, with an optional `File` for saving progress. This allows tests to provide controlled input and temporary save files.
+
+The prototype README described tests as future work. The repository now includes five JUnit test classes, including tests for quitting from menus and resubmitting challenges after basket changes.
+
+### LinkedChain Contract
+
+Our initial design assumed a chain with both head and tail references. The provided implementation instead uses a first-node reference and an entry count.
+
+`add()` inserts at the beginning of the chain. To preserve grocery insertion order, `GroceryBasket` calls `LinkedChain.addToEnd()`.
+
+This required us to understand the provided contract and build application behavior around its public API.
+
+## Development Reflection
+
+Dividing the project into classes helped separate the console interface, basket operations, grocery data, challenge requirements, and reusable storage.
+
+A challenge during development was keeping method signatures and class responsibilities consistent as features were added. Changes to one class could affect the classes and tests that depended on it.
+
+Committing to a generic contract meant deciding what the storage class should promise before every application feature was finished. We needed to understand insertion order, removal behavior, duplicates, and invalid arguments.
+
+Our understanding of reuse became more concrete through the project. A reusable class needs a clear contract that different clients can rely on. Generics allowed us to use the same linked-storage code with different element types while retaining type checking.
+
+## Stretch Features and Limitations
+
+Beyond the core basket operations, the implementation includes catalog browsing and searching, saved progress, undo, checkout, order history, and challenge scoring.
+
+The proposed coupon system was not implemented and remains a possible future extension.
+
+Catalog searching searches predefined products. It does not provide a separate searchable catalog of custom items.
+
+The application uses a text interface and local save files. Its prices and tax estimate are intended for the project demonstration.
+
+## Attribution
+
+Nikita led the coding work, with Kathy providing code review and additional programming assistance. Aleysa developed the presentation slides, and Miller prepared the written reflections and project writeups.
+
+The table below reflects these overall development and review roles; it does not imply equal contributions to every file.
+
+| File | Contributor(s) | Contribution |
+|---|---|---|
+| `GroceryApp.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `GroceryBasket.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `GroceryItem.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `ShoppingChallenge.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `LinkedChain.java` | CS 2114 Staff; Nikita; Kathy | Instructor-provided implementation, integrated into the application by Nikita with review and assistance from Kathy. |
+| `GroceryAppTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `GroceryBasketTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `GroceryItemTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `ShoppingChallengeTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `LinkedChainTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+
+### Other Project Contributions
+
+- **Nikita Polstyanko:** Led application development and coordinated the project.
+- **Aleysa:** Created and organized the presentation slides.
+- **Miller:** Prepared project writeups and written reflections.
+- **Kathy:** Reviewed the project, contributed diagrams, and provided additional coding assistance.
+
+## GenAI Use and Reflection
+
+GenAI assisted with project organization, code-structure suggestions, explanations of Java concepts and errors, and GitHub and Eclipse setup guidance. It also assisted with reviewing assignment requirements and drafting or revising the system diagram and README.
+
+Human contributions listed above include directing, reviewing, and revising AI-assisted work. The team remains responsible for understanding the submitted implementation, checking its behavior, and accurately describing its capabilities.
+
+Verification involves comparing suggestions with the actual source code and assignment requirements, reading the resulting implementation, exercising program features, and running the JUnit tests.
+
+One risk of over-reliance is accepting a fix without understanding why it works. This can make it harder to explain the implementation, identify new bugs, or help a teammate understand the code. It can also reduce opportunities for teammates to practice.
+
+For future work, we would provide relevant code and context, ask focused questions, and request explanations of proposed changes. We would involve teammates in reviewing changes so that everyone understands the parts they need to present and defend.
