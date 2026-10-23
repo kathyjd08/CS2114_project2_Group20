@@ -199,15 +199,15 @@ The table below reflects these overall development and review roles; it does not
 | File | Contributor(s) | Contribution |
 |---|---|---|
 | `GroceryApp.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
-| `GroceryBasket.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `GroceryBasket.java` | Nikita; Miller; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
 | `GroceryItem.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
-| `ShoppingChallenge.java` | Nikita; Kathy | Primary development by Nikita, with review and additional code assistance from Kathy. |
+| `ShoppingChallenge.java` | Nikita; Aleysa | Primary development by Nikita, with review and additional code assistance from Kathy. |
 | `LinkedChain.java` | CS 2114 Staff; Nikita; Kathy | Instructor-provided implementation, integrated into the application by Nikita with review and assistance from Kathy. |
 | `GroceryAppTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
-| `GroceryBasketTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `GroceryBasketTest.java` | Nikita; Aleysa | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
 | `GroceryItemTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
-| `ShoppingChallengeTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
-| `LinkedChainTest.java` | Nikita; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `ShoppingChallengeTest.java` | Nikita; Miller; Kathy | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
+| `LinkedChainTest.java` | Nikita; Miller | Test code development and revision, with Nikita leading the coding work and Kathy providing review and assistance. |
 
 ### Other Project Contributions
 
