@@ -9,13 +9,48 @@ import java.io.OutputStreamWriter;
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.util.Properties;
 import java.util.Scanner;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-/** Console application for Grab 'n' Go Groceries. */
+/**
+ * Console application for Grab 'n' Go Groceries.
+ *
+ * <p>The whole trip happens in one session: shop, edit the basket, set a
+ * budget, run challenges (with a scoring rubric), check out, and start the
+ * next trip without ever restarting the program. Handy commands work from
+ * almost any screen; type "help" to see them.</p>
+ */
 public class GroceryApp {
     private static final double TAX_RATE = 0.06;
     private static final int BAR_WIDTH = 20;
+    private static final int WIDTH = 60;
+    private static final int MAX_QUANTITY = 99;
+    private static final int MAX_HISTORY = 10;
+    private static final int MAX_BUDGET = 100000;
+
+    // Rubric weights (they add up to 100).
+    private static final int ITEM_POINTS = 20;
+    private static final int BUDGET_POINTS = 40;
+    private static final int SAVINGS_POINTS = 20;
+    private static final int VARIETY_POINTS = 20;
+    private static final int POINTS_PER_CATEGORY = 5;
+
+    /** "3", "3x2", "3 x 2", "3*2" or "3 2": an item number and optional quantity. */
+    private static final Pattern NUMBER_PICK = Pattern.compile(
+        "^(\\d{1,4})(?:(?:\\s*[x*]\\s*|\\s+)(\\d{1,3}))?$",
+        Pattern.CASE_INSENSITIVE);
+    /** "milk 2", "milk x2" or "milk*2": a name with a quantity at the end. */
+    private static final Pattern QUANTITY_SUFFIX = Pattern.compile(
+        "^(.+?)(?:\\s+x?\\s*|\\s*\\*\\s*)(\\d{1,3})$",
+        Pattern.CASE_INSENSITIVE);
+    /** Basket edits such as "-2", "+2 3", "r 1 all" or "del 2". */
+    private static final Pattern BASKET_EDIT = Pattern.compile(
+        "^(\\+|-|add|a|remove|rm|r|delete|del|d)\\s*(\\d{1,4})"
+        + "(?:\\s+(\\d{1,3}|all))?$",
+        Pattern.CASE_INSENSITIVE);
 
     private static final String[] AISLES = {
         "Fruit", "Vegetables", "Meat & Seafood", "Dairy & Eggs",
@@ -69,20 +104,61 @@ public class GroceryApp {
         }
     };
 
+    /** One row of the basket: an item and how many copies of it. */
+    private static class Line {
+        private final GroceryItem item;
+        private int quantity;
+
+        private Line(GroceryItem item) {
+            this.item = item;
+            this.quantity = 1;
+        }
+    }
+
+    /** The result of scoring a basket against a challenge. */
+    private static class Grade {
+        private int itemPoints;
+        private int budgetPoints;
+        private int savingsPoints;
+        private int varietyPoints;
+        private int score;
+        private String letter = "F";
+        private boolean passed;
+        private int itemCount;
+        private long spentCents;
+        private int categories;
+    }
+
+    /** A finished order, kept for the history screen. */
+    private static class Order {
+        private final String date;
+        private final int items;
+        private final long cents;
+        private final String note;
+
+        private Order(String date, int items, long cents, String note) {
+            this.date = date;
+            this.items = items;
+            this.cents = cents;
+            this.note = note;
+        }
+    }
+
     private final Scanner input;
-    private final File saveFile;    // null means progress is not saved
+    private final File saveFile;      // null means progress is not saved
     private GroceryBasket basket;
     private final LinkedChain<ShoppingChallenge> challenges;
-    private final int[] bestScores; // best passing score per challenge, -1 = none
+    private final LinkedChain<LinkedChain<GroceryItem>> undoStack;
+    private final LinkedChain<Order> history;
+    private final int[] bestScores;    // best passing score per challenge, -1 = none
     private ShoppingChallenge activeChallenge;
-    private int activeIndex;        // index of activeChallenge, -1 = none
-    private boolean challengeDone;  // true once the challenge has been graded
-    private boolean challengePassed;
-    private int challengeScore;
-    private String challengeGrade;
-    private double budget;          // 0 means no budget is set
-    private boolean exitRequested;  // true once the user asks to leave
-    private boolean restored;       // true if a saved trip was loaded
+    private int activeIndex;           // index of activeChallenge, -1 = none
+    private Grade lastGrade;           // most recent submission, null = none
+    private long budgetCents;          // 0 means no budget is set
+    private boolean exitRequested;     // true once the user asks to leave
+    private boolean goHome;            // true while backing out to the main menu
+    private boolean restored;          // true if a saved trip was loaded
+    private boolean saveWarned;        // so a failing save only complains once
 
     /** Creates an app that does not save progress. */
     public GroceryApp(Scanner input) {
@@ -101,14 +177,15 @@ public class GroceryApp {
         this.saveFile = saveFile;
         this.basket = new GroceryBasket();
         this.challenges = new LinkedChain<ShoppingChallenge>();
+        this.undoStack = new LinkedChain<LinkedChain<GroceryItem>>();
+        this.history = new LinkedChain<Order>();
         this.activeChallenge = null;
         this.activeIndex = -1;
-        this.challengeDone = false;
-        this.challengePassed = false;
-        this.challengeScore = 0;
-        this.challengeGrade = "";
-        this.budget = 0;
+        this.lastGrade = null;
+        this.budgetCents = 0;
         this.exitRequested = false;
+        this.goHome = false;
+        this.saveWarned = false;
 
         challenges.addToEnd(new ShoppingChallenge(
             "Movie Night", "Get snacks for movie night", 25.00, 4));
@@ -147,60 +224,157 @@ public class GroceryApp {
         new GroceryApp(new Scanner(System.in), saveFile).run();
     }
 
+    /** Runs the app until the user quits (or the input runs out). */
     public void run() {
         if (restored) {
-            System.out.println("Welcome back! Picking up where you left off.");
+            System.out.println("\nWelcome back! Your trip is right where you left it.");
+        }
+        else {
+            System.out.println("\nWelcome to Grab 'n' Go Groceries!");
+            System.out.println("Tip: type 'help' at any time to see shortcuts.");
         }
         while (!exitRequested) {
-            printMenu();
-            System.out.print("Choose an option: ");
-            if (!input.hasNextLine()) {
-                break;
+            goHome = false;
+            printMainMenu();
+            String text = ask("Choose an option: ");
+            if (text == null || text.isEmpty()) {
+                continue;
             }
-            String choice = input.nextLine().trim().toLowerCase();
-            switch (choice) {
-                case "1":
-                    browseAisles();
-                    break;
-                case "2":
-                    searchItems();
-                    break;
-                case "3":
-                    displayBasket();
-                    break;
-                case "4":
-                    removeItem();
-                    break;
-                case "5":
-                    setBudget();
-                    break;
-                case "6":
-                    startChallenge();
-                    break;
-                case "7":
-                    checkChallenge();
-                    break;
-                case "8":
-                    checkout();
-                    break;
-                case "9":
-                    newTrip();
-                    break;
-                case "0":
-                case "q":
-                case "exit":
-                    exitRequested = true;
-                    break;
-                default:
-                    System.out.println("Invalid menu option. Try again.");
-            }
+            handleMainChoice(text);
         }
         save();
-        if (saveFile != null && hasProgress()) {
+        if (saveFile != null && hasProgress() && !saveWarned) {
             System.out.println(
                 "Your trip is saved. Run the app again to pick up where you left off.");
         }
         System.out.println("Thanks for shopping!");
+    }
+
+    private void handleMainChoice(String text) {
+        switch (text.toLowerCase()) {
+            case "1":
+                browseAisles();
+                break;
+            case "2":
+                searchPrompt();
+                break;
+            case "3":
+                basketScreen();
+                break;
+            case "4":
+                budgetScreen();
+                break;
+            case "5":
+                challengeHub();
+                break;
+            case "6":
+                checkout();
+                break;
+            case "7":
+                showHistory();
+                break;
+            case "8":
+                newTrip();
+                break;
+            case "9":
+                printHelp();
+                break;
+            case "0":
+                exitRequested = true;
+                break;
+            default:
+                typedCommand(text);
+        }
+    }
+
+    /**
+     * Commands that work from the main menu and from most lists, so nobody
+     * has to back out just to do something else.
+     */
+    private void typedCommand(String text) {
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return;
+        }
+        int space = trimmed.indexOf(' ');
+        String cmd = (space < 0 ? trimmed : trimmed.substring(0, space))
+            .toLowerCase();
+        String rest = space < 0 ? "" : trimmed.substring(space + 1).trim();
+        switch (cmd) {
+            case "shop":
+            case "aisles":
+            case "browse":
+                browseAisles();
+                return;
+            case "search":
+            case "find":
+                if (rest.isEmpty()) {
+                    searchPrompt();
+                }
+                else {
+                    searchFor(rest);
+                }
+                return;
+            case "add":
+            case "buy":
+                quickAdd(rest, true);
+                return;
+            case "remove":
+            case "rm":
+            case "delete":
+                quickRemove(rest);
+                return;
+            case "basket":
+            case "cart":
+            case "edit":
+            case "view":
+                basketScreen();
+                return;
+            case "undo":
+                undo();
+                return;
+            case "clear":
+                clearBasket();
+                return;
+            case "budget":
+                budgetCommand(rest);
+                return;
+            case "challenge":
+            case "challenges":
+                challengeHub();
+                return;
+            case "submit":
+                submitChallenge();
+                return;
+            case "rubric":
+            case "score":
+            case "grade":
+                previewRubric();
+                return;
+            case "abandon":
+                abandonChallenge();
+                return;
+            case "checkout":
+            case "pay":
+                checkout();
+                return;
+            case "history":
+            case "orders":
+                showHistory();
+                return;
+            case "new":
+            case "reset":
+                newTrip();
+                return;
+            default:
+                break;
+        }
+        int aisle = findAisle(trimmed);
+        if (aisle >= 0) {
+            browseAisle(aisle);
+            return;
+        }
+        quickAdd(trimmed, false);
     }
 
     // ------------------------------------------------------------------
@@ -208,7 +382,7 @@ public class GroceryApp {
     // ------------------------------------------------------------------
 
     private boolean hasProgress() {
-        return !basket.isEmpty() || budget > 0 || activeIndex >= 0;
+        return !basket.isEmpty() || budgetCents > 0 || activeIndex >= 0;
     }
 
     private void save() {
@@ -216,30 +390,45 @@ public class GroceryApp {
             return;
         }
         Properties p = new Properties();
-        p.setProperty("budget", Double.toString(budget));
+        p.setProperty("budget", Double.toString(budgetCents / 100.0));
         p.setProperty("challenge", Integer.toString(activeIndex));
-        p.setProperty("challengeDone", Boolean.toString(challengeDone));
-        p.setProperty("challengePassed", Boolean.toString(challengePassed));
-        p.setProperty("challengeScore", Integer.toString(challengeScore));
-        p.setProperty("challengeGrade", challengeGrade);
+        if (lastGrade != null && activeIndex >= 0) {
+            p.setProperty("lastScore", Integer.toString(lastGrade.score));
+            p.setProperty("lastPassed", Boolean.toString(lastGrade.passed));
+            p.setProperty("lastItems", Integer.toString(lastGrade.itemCount));
+            p.setProperty("lastCents", Long.toString(lastGrade.spentCents));
+        }
         for (int i = 0; i < bestScores.length; i++) {
             p.setProperty("best." + i, Integer.toString(bestScores[i]));
         }
-        GroceryItem[] items = basket.getItems();
-        p.setProperty("items", Integer.toString(items.length));
-        for (int i = 0; i < items.length; i++) {
+        LinkedChain<GroceryItem> items = basket.snapshotItems();
+        p.setProperty("items", Integer.toString(items.size()));
+        for (int i = 0; i < items.size(); i++) {
             String prefix = "item." + i + ".";
-            p.setProperty(prefix + "name", items[i].getName());
-            p.setProperty(prefix + "price", Double.toString(items[i].getPrice()));
-            p.setProperty(prefix + "category", items[i].getCategory());
-            p.setProperty(prefix + "description", items[i].getDescription());
+            p.setProperty(prefix + "name", items.get(i).getName());
+            p.setProperty(prefix + "price", Double.toString(items.get(i).getPrice()));
+            p.setProperty(prefix + "category", items.get(i).getCategory());
+            p.setProperty(prefix + "description", items.get(i).getDescription());
+        }
+        p.setProperty("orders", Integer.toString(history.size()));
+        for (int i = 0; i < history.size(); i++) {
+            Order order = history.get(i);
+            String prefix = "order." + i + ".";
+            p.setProperty(prefix + "date", order.date);
+            p.setProperty(prefix + "items", Integer.toString(order.items));
+            p.setProperty(prefix + "cents", Long.toString(order.cents));
+            p.setProperty(prefix + "note", order.note);
         }
         try (Writer writer = new OutputStreamWriter(
             new FileOutputStream(saveFile), StandardCharsets.UTF_8)) {
             p.store(writer, "Grab 'n' Go Groceries saved trip");
+            saveWarned = false;
         }
         catch (IOException e) {
-            System.out.println("(Could not save your progress.)");
+            if (!saveWarned) {
+                System.out.println("(Could not save your progress.)");
+                saveWarned = true;
+            }
         }
     }
 
@@ -258,22 +447,35 @@ public class GroceryApp {
         }
         try {
             double savedBudget = Double.parseDouble(p.getProperty("budget", "0"));
-            if (!Double.isFinite(savedBudget) || savedBudget < 0) {
+            if (!Double.isFinite(savedBudget) || savedBudget < 0
+                || savedBudget > MAX_BUDGET) {
                 throw new IllegalArgumentException("bad budget");
             }
             int index = Integer.parseInt(p.getProperty("challenge", "-1"));
             if (index < -1 || index >= challenges.size()) {
                 throw new IllegalArgumentException("bad challenge");
             }
-            boolean done = index >= 0
-                && Boolean.parseBoolean(p.getProperty("challengeDone", "false"));
-            boolean passed = done
-                && Boolean.parseBoolean(p.getProperty("challengePassed", "false"));
-            int score = Integer.parseInt(p.getProperty("challengeScore", "0"));
-            String grade = p.getProperty("challengeGrade", "");
-            int[] bests = new int[bestScores.length];
-            for (int i = 0; i < bests.length; i++) {
-                bests[i] = Integer.parseInt(p.getProperty("best." + i, "-1"));
+            Grade grade = null;
+            int lastScore = Integer.parseInt(p.getProperty("lastScore", "-1"));
+            if (index >= 0 && lastScore >= 0) {
+                if (lastScore > 100) {
+                    throw new IllegalArgumentException("bad score");
+                }
+                grade = new Grade();
+                grade.score = lastScore;
+                grade.letter = letterGrade(lastScore);
+                grade.passed = Boolean.parseBoolean(
+                    p.getProperty("lastPassed", "false"));
+                grade.itemCount = Integer.parseInt(p.getProperty("lastItems", "0"));
+                grade.spentCents = Long.parseLong(p.getProperty("lastCents", "0"));
+            }
+            LinkedChain<Integer> bests = new LinkedChain<Integer>();
+            for (int i = 0; i < bestScores.length; i++) {
+                int score = Integer.parseInt(p.getProperty("best." + i, "-1"));
+                bests.addToEnd(score);
+                if (score < -1 || score > 100) {
+                    throw new IllegalArgumentException("bad best score");
+                }
             }
             int count = Integer.parseInt(p.getProperty("items", "0"));
             if (count < 0) {
@@ -296,17 +498,42 @@ public class GroceryApp {
                 }
                 loaded.addItem(new GroceryItem(name, price, category, description));
             }
+            int orderCount = Integer.parseInt(p.getProperty("orders", "0"));
+            if (orderCount < 0 || orderCount > 1000) {
+                throw new IllegalArgumentException("bad order count");
+            }
+            LinkedChain<Order> loadedOrders = new LinkedChain<Order>();
+            for (int i = 0; i < orderCount; i++) {
+                String prefix = "order." + i + ".";
+                String date = p.getProperty(prefix + "date");
+                String itemsText = p.getProperty(prefix + "items");
+                String centsText = p.getProperty(prefix + "cents");
+                if (date == null || itemsText == null || centsText == null) {
+                    throw new IllegalArgumentException("missing order data");
+                }
+                int orderItems = Integer.parseInt(itemsText);
+                long orderCents = Long.parseLong(centsText);
+                if (orderItems < 0 || orderCents < 0) {
+                    throw new IllegalArgumentException("bad order data");
+                }
+                loadedOrders.addToEnd(new Order(date, orderItems, orderCents,
+                    p.getProperty(prefix + "note", "")));
+            }
+            while (loadedOrders.size() > MAX_HISTORY) {
+                loadedOrders.remove();
+            }
             // Everything was valid, so apply it.
             basket = loaded;
-            budget = savedBudget;
+            budgetCents = Math.round(savedBudget * 100);
             activeIndex = index;
             activeChallenge = index >= 0 ? challenges.get(index) : null;
-            challengeDone = done;
-            challengePassed = passed;
-            challengeScore = score;
-            challengeGrade = grade;
-            for (int i = 0; i < bests.length; i++) {
-                bestScores[i] = bests[i];
+            lastGrade = grade;
+            for (int i = 0; i < bests.size(); i++) {
+                bestScores[i] = bests.get(i);
+            }
+            history.clear();
+            for (int i = 0; i < loadedOrders.size(); i++) {
+                history.addToEnd(loadedOrders.get(i));
             }
         }
         catch (IllegalArgumentException e) {
@@ -316,107 +543,136 @@ public class GroceryApp {
     }
 
     // ------------------------------------------------------------------
-    // Menus and status display
+    // Screens: layout helpers, menu, status, help
     // ------------------------------------------------------------------
 
-    private void printMenu() {
-        System.out.println("\n=== Grab 'n' Go Groceries ===");
-        printStatus();
-        System.out.println("1. Shop by aisle");
-        System.out.println("2. Search for an item");
-        System.out.println("3. View basket");
-        System.out.println("4. Remove an item");
-        System.out.println("5. Set budget");
-        System.out.println("6. Start a challenge");
-        System.out.println("7. Check challenge");
-        System.out.println("8. Checkout");
-        System.out.println("9. New trip (clear everything)");
-        System.out.println("0. Exit   (Q works in any menu; your trip is saved)");
+    private static String fill(char ch, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            sb.append(ch);
+        }
+        return sb.toString();
     }
 
-    private String itemWord(int count) {
+    private static String rule() {
+        return fill('-', WIDTH);
+    }
+
+    private static void header(String title) {
+        StringBuilder sb = new StringBuilder("== ");
+        sb.append(title).append(' ');
+        while (sb.length() < WIDTH) {
+            sb.append('=');
+        }
+        System.out.println();
+        System.out.println(sb);
+    }
+
+    private static String itemWord(int count) {
         return count == 1 ? "item" : "items";
     }
 
+    private static String money(long cents) {
+        return String.format("$%.2f", cents / 100.0);
+    }
+
+    private static long cents(double dollars) {
+        return Math.round(dollars * 100);
+    }
+
+    private void printTwo(String left, String right) {
+        System.out.printf("  %-30s%s%n", left, right);
+    }
+
+    private void printMainMenu() {
+        System.out.println();
+        System.out.println(fill('=', WIDTH));
+        System.out.println("  GRAB 'N' GO GROCERIES");
+        System.out.println(fill('=', WIDTH));
+        printStatus();
+        System.out.println(rule());
+        printTwo("1) Shop by aisle", "6) Checkout");
+        printTwo("2) Search for an item", "7) Order history");
+        printTwo("3) View / edit basket", "8) New trip");
+        printTwo("4) Budget", "9) Help");
+        printTwo("5) Challenges", "0) Save & quit");
+        System.out.println(rule());
+        System.out.println(" Shortcuts: add milk 2 | undo | submit | help");
+    }
+
+    /** Prints the basket, budget and challenge in a few aligned lines. */
     private void printStatus() {
         int count = basket.getItemCount();
-        System.out.printf("Basket: %d %s | $%.2f%n",
+        System.out.printf(" Basket     %d %s | $%.2f%n",
             count, itemWord(count), basket.getTotalPrice());
-        if (budget > 0) {
-            System.out.println(budgetLine());
+        if (budgetCents > 0) {
+            System.out.println(" Budget     " + budgetLine());
         }
-        if (activeChallenge != null) {
-            if (challengeDone) {
-                System.out.printf("Challenge: %s | %s - Grade %s (%d/100)%n",
-                    activeChallenge.getName(),
-                    challengePassed ? "PASSED" : "FAILED",
-                    challengeGrade, challengeScore);
-            }
-            else {
-                System.out.printf("Challenge: %s | %d/%d items | $%.2f of $%.2f%n",
-                    activeChallenge.getName(), count,
-                    activeChallenge.getMinimumItems(),
-                    basket.getTotalPrice(), activeChallenge.getMaxBudget());
-            }
+        String challenge = challengeStatus();
+        if (challenge != null) {
+            System.out.println(" Challenge  " + challenge);
         }
     }
 
-    /** Budget summary with a progress bar. Only call when budget > 0. */
+    /** Budget summary with a progress bar. Only call when a budget is set. */
     private String budgetLine() {
-        long spentCents = Math.round(basket.getTotalPrice() * 100);
-        long budgetCents = Math.round(budget * 100);
-        long leftCents = budgetCents - spentCents;
-        double fraction = Math.min(1.0, (double)spentCents / budgetCents);
+        long spent = totalCents();
+        long left = budgetCents - spent;
+        double fraction = Math.min(1.0, (double)spent / budgetCents);
         int filled = (int)Math.round(fraction * BAR_WIDTH);
         StringBuilder bar = new StringBuilder("[");
         for (int i = 0; i < BAR_WIDTH; i++) {
             bar.append(i < filled ? '#' : '-');
         }
         bar.append(']');
-        String status;
-        if (leftCents >= 0) {
-            status = String.format("$%.2f left", leftCents / 100.0);
-        }
-        else {
-            status = String.format("OVER by $%.2f", -leftCents / 100.0);
-        }
-        return String.format("Budget: $%.2f | %s %s", budget, bar, status);
+        String status = left >= 0
+            ? money(left) + " left"
+            : "OVER by " + money(-left);
+        return money(budgetCents) + " " + bar + " " + status;
     }
 
-    /** Prints how much budget remains (or a warning) after a change. */
-    private void reportBudget() {
-        if (budget <= 0) {
-            return;
+    /** One-line challenge summary, or null when no challenge is running. */
+    private String challengeStatus() {
+        if (activeChallenge == null) {
+            return null;
         }
-        long leftCents = Math.round(budget * 100)
-            - Math.round(basket.getTotalPrice() * 100);
-        if (leftCents >= 0) {
-            System.out.printf("Budget left: $%.2f%n", leftCents / 100.0);
+        ShoppingChallenge c = activeChallenge;
+        int count = basket.getItemCount();
+        long spent = totalCents();
+        StringBuilder sb = new StringBuilder(c.getName());
+        sb.append(" | ").append(count).append('/').append(c.getMinimumItems())
+            .append(" items | ")
+            .append(money(spent)).append(" of ").append(money(cents(c.getMaxBudget())));
+        if (spent > cents(c.getMaxBudget())) {
+            sb.append(" | OVER BUDGET");
         }
-        else {
-            System.out.printf("Warning: you're $%.2f over your budget!%n",
-                -leftCents / 100.0);
+        else if (count >= c.getMinimumItems()) {
+            sb.append(" | READY - type 'submit'");
         }
+        if (lastGrade != null) {
+            sb.append(" | last: ").append(lastGrade.letter).append(' ')
+                .append(lastGrade.score).append("/100");
+            if (lastGradeIsStale()) {
+                sb.append(" (basket changed)");
+            }
+        }
+        return sb.toString();
     }
 
-    /** Prints progress toward the active, ungraded challenge. */
-    private void reportChallenge() {
-        if (!challengeActive()) {
-            return;
-        }
-        int need = activeChallenge.getMinimumItems() - basket.getItemCount();
-        long leftCents = Math.round(activeChallenge.getMaxBudget() * 100)
-            - Math.round(basket.getTotalPrice() * 100);
-        if (leftCents >= 0) {
-            System.out.printf(
-                "Challenge: %d more %s to go, $%.2f of challenge budget left.%n",
-                need, itemWord(need), leftCents / 100.0);
-        }
-        else {
-            System.out.printf(
-                "Challenge warning: you're $%.2f over the challenge budget. "
-                + "Remove something to pass!%n", -leftCents / 100.0);
-        }
+    private void printHelp() {
+        header("HELP");
+        System.out.println(" Anywhere   home = main menu | 0 or back = step back");
+        System.out.println("            quit = save and exit | help = this screen");
+        System.out.println(" Shopping   shop | search <word> | add milk 2 | remove milk");
+        System.out.println("            or just type an item name, like: milk");
+        System.out.println(" In a list  3 = pick #3 | 3x2 = two of #3 | milk 2");
+        System.out.println("            next / prev = change aisle | dairy = jump to an aisle");
+        System.out.println(" Basket     basket (view and edit) | undo | clear");
+        System.out.println("            inside the basket: -2 remove one | -2 all | +2 add one");
+        System.out.println(" Money      budget 40 | budget off | checkout | history");
+        System.out.println(" Challenge  challenge | rubric (preview your score)");
+        System.out.println("            submit (get graded) | abandon");
+        System.out.println(" Trip       new = start over (history and best scores are kept)");
     }
 
     // ------------------------------------------------------------------
@@ -424,44 +680,81 @@ public class GroceryApp {
     // ------------------------------------------------------------------
 
     /**
-     * Reads a whole number in [min, max]. Returns 0 if the user goes back
-     * (0, B, back, cancel) or types Q (which also sets exitRequested), and
-     * -1 if the input runs out.
+     * Reads one line. Returns null when the user quits, goes home, or the
+     * input runs out; otherwise returns the trimmed text (possibly empty).
+     * "help" is answered right here and the prompt is shown again.
      */
-    private int readChoice(String prompt, int min, int max) {
+    private String ask(String prompt) {
         while (true) {
             System.out.print(prompt);
             if (!input.hasNextLine()) {
-                return -1;
+                System.out.println();
+                exitRequested = true;
+                return null;
             }
             String text = input.nextLine().trim();
-            if (text.equalsIgnoreCase("q")) {
+            String lower = text.toLowerCase();
+            if (lower.equals("q") || lower.equals("quit") || lower.equals("exit")) {
                 exitRequested = true;
-                return 0;
+                return null;
             }
-            if (text.equalsIgnoreCase("b") || text.equalsIgnoreCase("back")
-                || text.equalsIgnoreCase("cancel")) {
-                return 0;
+            if (lower.equals("home") || lower.equals("menu")
+                || lower.equals("m") || lower.equals("h")) {
+                goHome = true;
+                return null;
             }
-            try {
-                int value = Integer.parseInt(text);
-                if (value >= min && value <= max) {
-                    return value;
-                }
+            if (lower.equals("help") || lower.equals("?")) {
+                printHelp();
+                continue;
             }
-            catch (NumberFormatException e) {
-                // Invalid text is handled by the message below.
-            }
-            System.out.println("Please enter a number from " + min
-                + " to " + max + " (or Q to exit).");
+            return text;
         }
     }
 
-    /** Reads non-empty text. Returns null on "cancel" or when input ends. */
-    private String readNonEmpty(String prompt) {
+    private static boolean isBack(String text) {
+        return text.equals("0") || text.equalsIgnoreCase("b")
+            || text.equalsIgnoreCase("back") || text.equalsIgnoreCase("cancel");
+    }
+
+    private static int toInt(String text) {
+        if (text.matches("\\d{1,6}")) {
+            return Integer.parseInt(text);
+        }
+        return -1;
+    }
+
+    /**
+     * Reads a whole number in [min, max]. Returns 0 if the user goes back
+     * and -1 if they quit, went home, or the input ran out.
+     */
+    private int readNumber(String prompt, int min, int max) {
+        while (true) {
+            String text = ask(prompt);
+            if (text == null) {
+                return -1;
+            }
+            if (isBack(text)) {
+                return 0;
+            }
+            int value = toInt(text);
+            if (value >= min && value <= max) {
+                return value;
+            }
+            System.out.println("Please enter a number from " + min + " to "
+                + max + ", or 0 to go back.");
+        }
+    }
+
+    /**
+     * Reads free text (names, search words). Returns null on "cancel" or when
+     * the input ends. A blank answer uses the default, or asks again.
+     */
+    private String readText(String prompt, String defaultValue) {
         while (true) {
             System.out.print(prompt);
             if (!input.hasNextLine()) {
+                System.out.println();
+                exitRequested = true;
                 return null;
             }
             String value = input.nextLine().trim();
@@ -471,49 +764,356 @@ public class GroceryApp {
             if (!value.isEmpty()) {
                 return value;
             }
-            System.out.println("Input cannot be empty. Try again.");
+            if (defaultValue != null) {
+                return defaultValue;
+            }
+            System.out.println("Please enter something, or type cancel.");
         }
     }
 
     /** Reads a positive price. Returns NaN on "cancel" or when input ends. */
-    private double readPositivePrice() {
+    private double readPrice() {
         while (true) {
-            System.out.print("Price: $");
-            if (!input.hasNextLine()) {
+            String text = readText("Price: $", null);
+            if (text == null) {
                 return Double.NaN;
             }
-            String value = input.nextLine().trim();
-            if (value.equalsIgnoreCase("cancel")) {
-                return Double.NaN;
+            if (text.startsWith("$")) {
+                text = text.substring(1).trim();
             }
             try {
-                double price = Double.parseDouble(value);
-                if (Double.isFinite(price) && price > 0) {
+                double price = Double.parseDouble(text);
+                if (Double.isFinite(price) && price >= 0.01 && price <= 10000) {
                     return price;
                 }
             }
             catch (NumberFormatException e) {
                 // Invalid text is handled by the message below.
             }
-            System.out.println("Price must be a positive number. Try again.");
+            System.out.println(
+                "Price must be a positive amount like 2.50. Try again.");
         }
     }
 
     private boolean askYesNo(String prompt) {
         while (true) {
-            System.out.print(prompt);
-            if (!input.hasNextLine()) {
+            String text = ask(prompt);
+            if (text == null) {
                 return false;
             }
-            String text = input.nextLine().trim().toLowerCase();
-            if (text.equals("y") || text.equals("yes")) {
+            String lower = text.toLowerCase();
+            if (lower.equals("y") || lower.equals("yes")) {
                 return true;
             }
-            if (text.equals("n") || text.equals("no")) {
+            if (lower.equals("n") || lower.equals("no") || isBack(lower)) {
                 return false;
             }
             System.out.println("Please answer y or n.");
         }
+    }
+
+    /** Splits "milk 2" / "milk x2" into {"milk", "2"}; quantity may be "". */
+    private static LinkedChain<String> splitQuantity(String text) {
+        Matcher m = QUANTITY_SUFFIX.matcher(text.trim());
+        if (m.matches()) {
+            LinkedChain<String> result = new LinkedChain<String>();
+            result.addToEnd(m.group(1).trim());
+            result.addToEnd(m.group(2));
+            return result;
+        }
+        LinkedChain<String> result = new LinkedChain<String>();
+        result.addToEnd(text.trim());
+        result.addToEnd("");
+        return result;
+    }
+
+    private static int quantityOf(String digits) {
+        return digits.isEmpty() ? 0 : Integer.parseInt(digits);
+    }
+
+    // ------------------------------------------------------------------
+    // Basket helpers
+    // ------------------------------------------------------------------
+
+    private long totalCents() {
+        return cents(basket.getTotalPrice());
+    }
+
+    private int countInBasket(GroceryItem item) {
+        int count = 0;
+        for (int i = 0; i < basket.getItemCount(); i++) {
+            GroceryItem other = basket.getItem(i);
+            if (other.equals(item)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countCategoryInBasket(String category) {
+        int count = 0;
+        for (int i = 0; i < basket.getItemCount(); i++) {
+            GroceryItem item = basket.getItem(i);
+            if (item.getCategory().trim().equalsIgnoreCase(category)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Groups identical items and sorts the lines without an array. */
+    private LinkedChain<Line> basketLines() {
+        LinkedChain<Line> unsorted = new LinkedChain<Line>();
+        for (int i = 0; i < basket.getItemCount(); i++) {
+            GroceryItem item = basket.getItem(i);
+            Line found = null;
+            for (int j = 0; j < unsorted.size(); j++) {
+                Line candidate = unsorted.get(j);
+                if (candidate.item.equals(item)) {
+                    found = candidate;
+                    break;
+                }
+            }
+            if (found == null) {
+                unsorted.addToEnd(new Line(item));
+            }
+            else {
+                found.quantity++;
+            }
+        }
+        LinkedChain<Line> sorted = new LinkedChain<Line>();
+        while (!unsorted.isEmpty()) {
+            Line smallest = unsorted.get(0);
+            for (int i = 1; i < unsorted.size(); i++) {
+                Line candidate = unsorted.get(i);
+                if (compareLines(candidate, smallest) < 0) {
+                    smallest = candidate;
+                }
+            }
+            sorted.addToEnd(smallest);
+            unsorted.remove(smallest);
+        }
+        return sorted;
+    }
+
+    private static int compareLines(Line a, Line b) {
+        int byName = a.item.getName().compareToIgnoreCase(b.item.getName());
+        if (byName != 0) {
+            return byName;
+        }
+        return Double.compare(a.item.getPrice(), b.item.getPrice());
+    }
+
+    /** Saves an independent chain of item references for undo. */
+    private void snapshot() {
+        undoStack.add(basket.snapshotItems());
+    }
+
+    private void undo() {
+        if (undoStack.isEmpty()) {
+            System.out.println("Nothing to undo.");
+            return;
+        }
+        LinkedChain<GroceryItem> previous = undoStack.remove();
+        GroceryBasket restoredBasket = new GroceryBasket();
+        restoredBasket.restoreItems(previous);
+        basket = restoredBasket;
+        System.out.printf("Undid your last change. Basket: %d %s | $%.2f%n",
+            basket.getItemCount(), itemWord(basket.getItemCount()),
+            basket.getTotalPrice());
+        reportBudget();
+        save();
+    }
+
+    private void clearBasket() {
+        if (basket.isEmpty()) {
+            System.out.println("Your basket is already empty.");
+            return;
+        }
+        snapshot();
+        basket = new GroceryBasket();
+        System.out.println("Basket cleared. Type 'undo' to bring it back.");
+        save();
+    }
+
+    private void printBasketTable(LinkedChain<Line> lines) {
+        System.out.println("  #  Item                 Qty    Each     Total");
+        for (int i = 0; i < lines.size(); i++) {
+            Line l = lines.get(i);
+            long each = cents(l.item.getPrice());
+            System.out.printf(" %2d  %-20s %3d  %7s  %8s%n", i + 1,
+                l.item.getName(), l.quantity, money(each),
+                money(each * l.quantity));
+        }
+        System.out.println(rule());
+        int count = basket.getItemCount();
+        System.out.printf(" %d %s | Basket total: $%.2f%n",
+            count, itemWord(count), basket.getTotalPrice());
+    }
+
+    /** The basket screen: view it, and change it without leaving. */
+    private void basketScreen() {
+        while (!exitRequested && !goHome) {
+            LinkedChain<Line> lines = basketLines();
+            header("YOUR BASKET");
+            if (lines.size() == 0) {
+                System.out.println(
+                    "Your basket is empty. Type 'shop' (or pick 1) to fill it.");
+                return;
+            }
+            printBasketTable(lines);
+            if (budgetCents > 0) {
+                System.out.println(" Budget: " + budgetLine());
+            }
+            String challenge = challengeStatus();
+            if (challenge != null) {
+                System.out.println(" Challenge: " + challenge);
+            }
+            System.out.println(
+                " Edit: -2 remove one | -2 all | +2 add one | clear | undo | 0 back");
+            String text = ask("Edit basket: ");
+            if (text == null) {
+                return;
+            }
+            if (text.isEmpty()) {
+                continue;
+            }
+            if (isBack(text)) {
+                return;
+            }
+            String lower = text.toLowerCase();
+            if (lower.equals("basket") || lower.equals("cart")
+                || lower.equals("edit") || lower.equals("view")) {
+                continue;
+            }
+            Matcher m = BASKET_EDIT.matcher(text);
+            if (m.matches()) {
+                editLine(lines, m.group(1), m.group(2), m.group(3));
+            }
+            else {
+                typedCommand(text);
+            }
+        }
+    }
+
+    private void editLine(LinkedChain<Line> lines, String op, String lineText, String arg) {
+        int number = Integer.parseInt(lineText);
+        if (number < 1 || number > lines.size()) {
+            System.out.println("There is no line " + number + ". Choose 1 to "
+                + lines.size() + ".");
+            return;
+        }
+        Line line = lines.get(number - 1);
+        String o = op.toLowerCase();
+        boolean adding = o.equals("+") || o.equals("a") || o.equals("add");
+        boolean all = o.startsWith("d");
+        int quantity = 1;
+        if (arg != null) {
+            if (arg.equalsIgnoreCase("all")) {
+                all = true;
+            }
+            else {
+                quantity = Integer.parseInt(arg);
+            }
+        }
+        if (quantity < 1) {
+            System.out.println("Use a quantity of 1 or more.");
+        }
+        else if (adding && all) {
+            System.out.println("To add several, give a number: +" + number + " 3");
+        }
+        else if (adding) {
+            addToBasket(line.item, quantity);
+        }
+        else {
+            removeFromBasket(line, all ? line.quantity
+                : Math.min(quantity, line.quantity));
+        }
+    }
+
+    private void removeFromBasket(Line line, int quantity) {
+        snapshot();
+        int removed = 0;
+        for (int i = 0; i < quantity; i++) {
+            if (basket.removeItem(line.item)) {
+                removed++;
+            }
+            else {
+                break;
+            }
+        }
+        if (removed == 0) {
+            undoStack.remove();    // nothing changed, so drop the snapshot
+            System.out.println("Could not remove that item.");
+            return;
+        }
+        System.out.printf("Removed %d x %s.%n", removed, line.item.getName());
+        System.out.printf("Basket: %d %s | $%.2f%n", basket.getItemCount(),
+            itemWord(basket.getItemCount()), basket.getTotalPrice());
+        reportBudget();
+        reportChallenge(false);
+        save();
+    }
+
+    /** "remove milk", "remove milk 2" or "remove milk all". */
+    private void quickRemove(String rest) {
+        if (rest.isEmpty()) {
+            System.out.println("Usage: remove <item> [qty|all]   e.g. remove milk");
+            System.out.println("(Or open the basket and use -2 to remove line 2.)");
+            return;
+        }
+        String name;
+        int quantity = 1;
+        boolean all = false;
+        if (rest.toLowerCase().matches(".*\\s+all")) {
+            all = true;
+            name = rest.substring(0, rest.length() - 3).trim();
+        }
+        else {
+            LinkedChain<String> split = splitQuantity(rest);
+            name = split.get(0);
+            if (!split.get(1).isEmpty()) {
+                quantity = Integer.parseInt(split.get(1));
+            }
+        }
+        if (quantity < 1) {
+            System.out.println("Use a quantity of 1 or more.");
+            return;
+        }
+        Line line = findLine(basketLines(), name);
+        if (line != null) {
+            removeFromBasket(line, all ? line.quantity
+                : Math.min(quantity, line.quantity));
+        }
+    }
+
+    /** Finds a basket line by name; says why when it cannot pick one. */
+    private Line findLine(LinkedChain<Line> lines, String name) {
+        String needle = name.trim().toLowerCase();
+        Line only = null;
+        int matches = 0;
+        for (int i = 0; i < lines.size(); i++) {
+            Line line = lines.get(i);
+            String lineName = line.item.getName().toLowerCase();
+            if (lineName.equals(needle)) {
+                return line;
+            }
+            if (lineName.contains(needle)) {
+                only = line;
+                matches++;
+            }
+        }
+        if (matches == 1) {
+            return only;
+        }
+        if (matches == 0) {
+            System.out.println("Nothing named \"" + name + "\" in your basket.");
+        }
+        else {
+            System.out.println("\"" + name + "\" matches more than one item. "
+                + "Open the basket and use -2 style edits.");
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -522,225 +1122,460 @@ public class GroceryApp {
 
     /** Aisle menu: "What are you looking for?" */
     private void browseAisles() {
-        int customChoice = AISLES.length + 1;
-        while (!exitRequested) {
-            System.out.println("\n--- What are you looking for? ---");
+        int custom = AISLES.length + 1;
+        while (!exitRequested && !goHome) {
+            header("WHAT ARE YOU LOOKING FOR?");
             printStatus();
+            System.out.println(rule());
             for (int i = 0; i < AISLES.length; i++) {
-                System.out.printf("%d. %s%n", i + 1, AISLES[i]);
+                int inBasket = countCategoryInBasket(AISLES[i]);
+                System.out.printf(" %d) %-16s %s%n", i + 1, AISLES[i],
+                    inBasket > 0 ? "(" + inBasket + " in basket)" : "");
             }
-            System.out.println(customChoice
-                + ". Something else (enter your own item)");
-            System.out.println("0. Back to main menu");
-            int choice = readChoice("Choose an aisle: ", 0, customChoice);
-            if (choice <= 0) {
+            System.out.println(" " + custom + ") Something else (add your own item)");
+            System.out.println(" 0) Back");
+            System.out.println(
+                "Tip: type an aisle or item name, like \"dairy\" or \"milk 2\".");
+            String text = ask("Choose an aisle: ");
+            if (text == null) {
                 return;
             }
-            if (choice == customChoice) {
-                addCustomItem();
-            }
-            else {
-                browseItems(AISLES[choice - 1], CATALOG[choice - 1], false);
-            }
-        }
-    }
-
-    /** Shows a list of items with prices and adds what the user picks. */
-    private void browseItems(String title, GroceryItem[] items,
-        boolean showCategory) {
-        while (!exitRequested) {
-            System.out.println("\n--- " + title + " ---");
-            printStatus();
-            for (int i = 0; i < items.length; i++) {
-                String extra = showCategory
-                    ? items[i].getCategory() + ": " : "";
-                System.out.printf("%d. %-16s $%5.2f  %s%s%n", i + 1,
-                    items[i].getName(), items[i].getPrice(), extra,
-                    items[i].getDescription());
-            }
-            System.out.println("0. Back");
-            int choice = readChoice("Pick an item: ", 0, items.length);
-            if (choice <= 0) {
-                return;
-            }
-            GroceryItem item = items[choice - 1];
-            int quantity = readQuantity(item);
-            if (quantity < 1) {
+            if (text.isEmpty()) {
                 continue;
             }
-            addToBasket(item, quantity);
+            if (isBack(text)) {
+                return;
+            }
+            int number = toInt(text);
+            if (number >= 1 && number <= AISLES.length) {
+                browseAisle(number - 1);
+            }
+            else if (number == custom) {
+                addCustomItem();
+            }
+            else if (number >= 0) {
+                System.out.println("Please pick 1 to " + custom + ", or 0 to go back.");
+            }
+            else {
+                typedCommand(text);
+            }
         }
     }
 
-    private int readQuantity(GroceryItem item) {
-        StringBuilder prompt = new StringBuilder("How many? (1-99");
-        if (budget > 0) {
-            long leftCents = Math.round(budget * 100)
-                - Math.round(basket.getTotalPrice() * 100);
-            long priceCents = Math.max(1, Math.round(item.getPrice() * 100));
-            long fits = leftCents > 0 ? leftCents / priceCents : 0;
-            prompt.append(", your budget fits ").append(fits);
+    private static LinkedChain<GroceryItem> aisleItems(int index) {
+        LinkedChain<GroceryItem> result = new LinkedChain<GroceryItem>();
+        for (int i = 0; i < CATALOG[index].length; i++) {
+            result.addToEnd(CATALOG[index][i]);
         }
-        if (challengeActive()) {
-            int need = activeChallenge.getMinimumItems() - basket.getItemCount();
-            prompt.append(", challenge needs ").append(need).append(" more");
+        return result;
+    }
+
+    /** Walks one aisle; "next", "prev" and aisle names move between aisles. */
+    private void browseAisle(int start) {
+        int current = start;
+        while (!exitRequested && !goHome) {
+            int jump = browseItems("AISLE " + (current + 1) + " OF "
+                + AISLES.length + ": " + AISLES[current].toUpperCase(),
+                aisleItems(current), false, current);
+            if (jump < 0) {
+                return;
+            }
+            current = jump;
         }
-        prompt.append(", 0 to cancel): ");
-        return readChoice(prompt.toString(), 0, 99);
     }
 
     /**
-     * Adds copies of an item. During a challenge, adding stops at the
-     * challenge's item limit and the basket is graded right away.
+     * Shows a list of items and adds whatever the user picks, staying on the
+     * list so several things can be added in a row. Returns the index of an
+     * aisle to jump to, or -1 when the user is done with the list.
      */
-    private void addToBasket(GroceryItem item, int quantity) {
-        int toAdd = quantity;
-        boolean capped = false;
-        if (challengeActive()) {
-            int room = activeChallenge.getMinimumItems() - basket.getItemCount();
-            if (toAdd > room) {
-                toAdd = Math.max(room, 0);
-                capped = true;
+    private int browseItems(String title, LinkedChain<GroceryItem> items,
+        boolean showCategory, int aisleIndex) {
+        while (!exitRequested && !goHome) {
+            header(title);
+            printStatus();
+            System.out.println(rule());
+            printItemTable(items, showCategory);
+            System.out.println(" 0) Back");
+            if (aisleIndex >= 0) {
+                System.out.println(
+                    "Pick: 3 | 3x2 (two of #3) | milk 2 | next | prev | an aisle name");
+            }
+            else {
+                System.out.println("Pick: 3 | 3x2 (two of #3) | milk 2 | an aisle name");
+            }
+            String text = ask("Pick an item: ");
+            if (text == null) {
+                return -1;
+            }
+            if (text.isEmpty()) {
+                continue;
+            }
+            if (isBack(text)) {
+                return -1;
+            }
+            String lower = text.toLowerCase();
+            if (aisleIndex >= 0 && (lower.equals("next") || lower.equals("n"))) {
+                return (aisleIndex + 1) % AISLES.length;
+            }
+            if (aisleIndex >= 0 && (lower.equals("prev") || lower.equals("p")
+                || lower.equals("previous"))) {
+                return (aisleIndex + AISLES.length - 1) % AISLES.length;
+            }
+            Matcher m = NUMBER_PICK.matcher(text);
+            if (m.matches()) {
+                int number = Integer.parseInt(m.group(1));
+                if (number < 1 || number > items.size()) {
+                    System.out.println("There is no item #" + number
+                        + ". Pick 1 to " + items.size() + ", or 0 to go back.");
+                }
+                else {
+                    pickItem(items.get(number - 1),
+                        m.group(2) == null ? 0 : Integer.parseInt(m.group(2)));
+                }
+                continue;
+            }
+            LinkedChain<String> split = splitQuantity(text);
+            int found = findInList(items, split.get(0));
+            if (found >= 0) {
+                pickItem(items.get(found), quantityOf(split.get(1)));
+                continue;
+            }
+            int aisle = findAisle(text);
+            if (aisle >= 0) {
+                if (aisle != aisleIndex) {
+                    return aisle;
+                }
+                continue;
+            }
+            typedCommand(text);
+        }
+        return -1;
+    }
+
+    private void printItemTable(LinkedChain<GroceryItem> items, boolean showCategory) {
+        System.out.println("  #  Item              Price   Details");
+        for (int i = 0; i < items.size(); i++) {
+            int inBasket = countInBasket(items.get(i));
+            String where = showCategory ? "[" + items.get(i).getCategory() + "] " : "";
+            String mark = inBasket > 0 ? "  <- x" + inBasket + " in basket" : "";
+            System.out.printf(" %2d) %-16s %6s  %s%s%s%n", i + 1,
+                items.get(i).getName(), money(cents(items.get(i).getPrice())), where,
+                items.get(i).getDescription(), mark);
+        }
+    }
+
+    /** Index of the list item a typed name refers to, or -1. */
+    private static int findInList(LinkedChain<GroceryItem> items, String name) {
+        String needle = name.trim().toLowerCase();
+        if (needle.isEmpty()) {
+            return -1;
+        }
+        int onlyStart = -1;
+        int starts = 0;
+        int onlyContains = -1;
+        int contains = 0;
+        for (int i = 0; i < items.size(); i++) {
+            String itemName = items.get(i).getName().toLowerCase();
+            if (itemName.equals(needle)) {
+                return i;
+            }
+            if (itemName.startsWith(needle)) {
+                onlyStart = i;
+                starts++;
+            }
+            else if (itemName.contains(needle)) {
+                onlyContains = i;
+                contains++;
             }
         }
-        for (int i = 0; i < toAdd; i++) {
+        if (starts == 1) {
+            return onlyStart;
+        }
+        if (starts == 0 && contains == 1) {
+            return onlyContains;
+        }
+        return -1;
+    }
+
+    /** Index of the aisle a typed word names (3+ letters of its start), or -1. */
+    private static int findAisle(String text) {
+        String needle = text.trim().toLowerCase();
+        if (needle.length() < 3) {
+            return -1;
+        }
+        for (int i = 0; i < AISLES.length; i++) {
+            if (AISLES[i].toLowerCase().startsWith(needle)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Adds an item; a quantity of 0 means "ask how many". */
+    private void pickItem(GroceryItem item, int quantity) {
+        if (quantity > MAX_QUANTITY) {
+            System.out.println("You can add up to " + MAX_QUANTITY + " at a time.");
+            return;
+        }
+        int amount = quantity > 0 ? quantity : readQuantity(item);
+        if (amount >= 1) {
+            addToBasket(item, amount);
+        }
+    }
+
+    /** Asks how many. Enter means 1; returns 0 if cancelled. */
+    private int readQuantity(GroceryItem item) {
+        StringBuilder hint = new StringBuilder();
+        if (budgetCents > 0) {
+            long left = budgetCents - totalCents();
+            long price = Math.max(1, cents(item.getPrice()));
+            hint.append("budget fits ").append(left > 0 ? left / price : 0);
+        }
+        if (activeChallenge != null) {
+            int need = activeChallenge.getMinimumItems() - basket.getItemCount();
+            if (hint.length() > 0) {
+                hint.append(", ");
+            }
+            hint.append(need > 0
+                ? "challenge needs " + need + " more" : "challenge minimum met");
+        }
+        if (hint.length() > 0) {
+            System.out.println("  (" + hint + ")");
+        }
+        while (true) {
+            String text = ask("How many " + item.getName()
+                + "? [1] (0 to cancel): ");
+            if (text == null || isBack(text)) {
+                return 0;
+            }
+            if (text.isEmpty()) {
+                return 1;
+            }
+            int value = toInt(text);
+            if (value >= 1 && value <= MAX_QUANTITY) {
+                return value;
+            }
+            System.out.println("Enter a number from 1 to " + MAX_QUANTITY
+                + ", press Enter for 1, or 0 to cancel.");
+        }
+    }
+
+    /** Adds copies of an item and reports on the budget and challenge. */
+    private void addToBasket(GroceryItem item, int quantity) {
+        boolean wasMet = challengeMet();
+        snapshot();
+        for (int i = 0; i < quantity; i++) {
             basket.addItem(item);
         }
-        if (toAdd > 0) {
-            System.out.printf("Item added! %d x %s ($%.2f each)%n",
-                toAdd, item.getName(), item.getPrice());
-        }
-        if (capped) {
-            System.out.printf("Challenge limit reached: added only %d of %d.%n",
-                toAdd, quantity);
-        }
+        System.out.printf("Added %d x %s ($%.2f each).%n",
+            quantity, item.getName(), item.getPrice());
+        System.out.printf("Basket: %d %s | $%.2f%n", basket.getItemCount(),
+            itemWord(basket.getItemCount()), basket.getTotalPrice());
         reportBudget();
-        if (!gradeIfReached()) {
-            reportChallenge();
-        }
+        reportChallenge(wasMet);
         save();
     }
 
-    /** The type-it-yourself flow for items not in the catalog. */
-    private void addCustomItem() {
-        System.out.println("(Type 'cancel' at any prompt to go back.)");
-        String name = readNonEmpty("Item name: ");
-        if (name == null) return;
-        double price = readPositivePrice();
-        if (Double.isNaN(price)) return;
-        String category = readNonEmpty("Category: ");
-        if (category == null) return;
-        String description = readNonEmpty("Description: ");
-        if (description == null) return;
-        addToBasket(new GroceryItem(name, price, category, description), 1);
-    }
-
-    /** Finds catalog items by name, description or aisle. */
-    private void searchItems() {
-        String term = readNonEmpty("Search for an item (or 'cancel'): ");
-        if (term == null) {
+    /** "add milk", "add milk 2", or just "milk" (which asks how many). */
+    private void quickAdd(String rest, boolean explicit) {
+        if (rest.isEmpty()) {
+            System.out.println("Usage: add <item> [qty]   e.g. add milk 2");
             return;
         }
+        LinkedChain<String> split = splitQuantity(rest);
+        int quantity = quantityOf(split.get(1));
+        LinkedChain<GroceryItem> matches = catalogMatches(split.get(0));
+        if (matches.size() == 0) {
+            System.out.println("No items match \"" + split.get(0) + "\". "
+                + "Try 'shop' to browse, 'help' for commands, or add your own "
+                + "item from the aisle menu.");
+            return;
+        }
+        if (quantity > MAX_QUANTITY) {
+            System.out.println("You can add up to " + MAX_QUANTITY + " at a time.");
+            return;
+        }
+        if (matches.size() == 1) {
+            pickItem(matches.get(0), quantity == 0 && explicit ? 1 : quantity);
+            return;
+        }
+        int jump = browseItems("MATCHES FOR \"" + split.get(0) + "\"",
+            matches, true, -1);
+        if (jump >= 0) {
+            browseAisle(jump);
+        }
+    }
+
+    /** Best catalog matches for a typed name: exact, then name, then anything. */
+    private static LinkedChain<GroceryItem> catalogMatches(String term) {
+        String needle = term.trim().toLowerCase();
+        LinkedChain<GroceryItem> exact = new LinkedChain<GroceryItem>();
+        LinkedChain<GroceryItem> byName = new LinkedChain<GroceryItem>();
+        LinkedChain<GroceryItem> broad = new LinkedChain<GroceryItem>();
+        for (GroceryItem[] aisle : CATALOG) {
+            for (GroceryItem item : aisle) {
+                String name = item.getName().toLowerCase();
+                if (name.equals(needle)) {
+                    exact.addToEnd(item);
+                }
+                else if (name.contains(needle)) {
+                    byName.addToEnd(item);
+                }
+                else if (matchesAnything(item, needle)) {
+                    broad.addToEnd(item);
+                }
+            }
+        }
+        LinkedChain<GroceryItem> best = !exact.isEmpty() ? exact
+            : !byName.isEmpty() ? byName : broad;
+        return best;
+    }
+
+    private static boolean matchesAnything(GroceryItem item, String needle) {
+        return item.getName().toLowerCase().contains(needle)
+            || item.getDescription().toLowerCase().contains(needle)
+            || item.getCategory().toLowerCase().contains(needle);
+    }
+
+    private void searchPrompt() {
+        String term = readText("Search for an item (or 'cancel'): ", null);
+        if (term != null) {
+            searchFor(term);
+        }
+    }
+
+    /** Lists every catalog item matching a name, description or aisle. */
+    private void searchFor(String term) {
         String needle = term.toLowerCase();
         LinkedChain<GroceryItem> matches = new LinkedChain<GroceryItem>();
         for (GroceryItem[] aisle : CATALOG) {
             for (GroceryItem item : aisle) {
-                if (item.getName().toLowerCase().contains(needle)
-                    || item.getDescription().toLowerCase().contains(needle)
-                    || item.getCategory().toLowerCase().contains(needle)) {
+                if (matchesAnything(item, needle)) {
                     matches.addToEnd(item);
                 }
             }
         }
         if (matches.isEmpty()) {
-            System.out.println("No items match \"" + term + "\".");
+            System.out.println("No items match \"" + term + "\". "
+                + "Try another word, or type 'shop' to browse the aisles.");
             return;
         }
-        browseItems("Search results for \"" + term + "\"",
-            matches.toArray(new GroceryItem[matches.size()]), true);
+        int jump = browseItems("RESULTS FOR \"" + term + "\"",
+            matches, true, -1);
+        if (jump >= 0) {
+            browseAisle(jump);
+        }
     }
 
-    private void removeItem() {
-        if (basket.isEmpty()) {
-            System.out.println("Your basket is empty. Nothing to remove.");
+    /** The type-it-yourself flow for items not in the catalog. */
+    private void addCustomItem() {
+        System.out.println("(Type 'cancel' at any prompt to go back.)");
+        String name = readText("Item name: ", null);
+        if (name == null) {
             return;
         }
-        System.out.println(basket);
-        String name = readNonEmpty("Name of item to remove (or 'cancel'): ");
-        if (name == null) return;
-        GroceryItem item = basket.findByName(name);
-        if (item == null) {
-            System.out.println("Item not found.");
+        double price = readPrice();
+        if (Double.isNaN(price)) {
+            return;
         }
-        else if (basket.removeItem(item)) {
-            System.out.println("Removed one copy of " + name + ".");
-            reportBudget();
-            reportChallenge();
-            save();
+        String category = readText("Category (Enter for Other): ", "Other");
+        if (category == null) {
+            return;
+        }
+        String description = readText("Description (Enter to skip): ",
+            "Custom item");
+        if (description == null) {
+            return;
+        }
+        GroceryItem item = new GroceryItem(name, price, category, description);
+        pickItem(item, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Budget
+    // ------------------------------------------------------------------
+
+    /** Prints how much budget remains (or a warning) after a change. */
+    private void reportBudget() {
+        if (budgetCents <= 0) {
+            return;
+        }
+        long left = budgetCents - totalCents();
+        if (left >= 0) {
+            System.out.printf("Budget left: %s%n", money(left));
         }
         else {
-            System.out.println("Item not found.");
+            System.out.printf("Warning: you're %s over your budget!%n",
+                money(-left));
         }
     }
 
-    private void displayBasket() {
-        System.out.println("\n--- Your Basket ---");
-        System.out.println(basket);
-        System.out.println("Number of items: " + basket.getItemCount());
-        System.out.printf("Total price: $%.2f%n", basket.getTotalPrice());
-        if (budget > 0) {
-            System.out.println(budgetLine());
+    private void budgetScreen() {
+        header("BUDGET");
+        if (budgetCents > 0) {
+            System.out.println(" Current: " + budgetLine());
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Budget, challenges, grading, checkout
-    // ------------------------------------------------------------------
-
-    private void setBudget() {
-        System.out.println("\n--- Set Budget ---");
-        if (budget > 0) {
-            System.out.printf("Current budget: $%.2f%n", budget);
+        else {
+            System.out.println(" No budget set.");
         }
         System.out.println(
-            "Enter an amount, 0 to clear your budget, or 'cancel' to go back.");
+            " Enter an amount like 40, 'off' to remove it, or 0 to go back.");
         while (true) {
-            System.out.print("Budget: $");
-            if (!input.hasNextLine()) {
+            String text = ask("Budget: $");
+            if (text == null || isBack(text)) {
                 return;
             }
-            String text = input.nextLine().trim();
-            if (text.equalsIgnoreCase("cancel")) {
+            if (applyBudget(text)) {
                 return;
-            }
-            try {
-                double value = Double.parseDouble(text);
-                if (value == 0) {
-                    budget = 0;
-                    System.out.println("Budget cleared.");
-                    save();
-                    return;
-                }
-                if (Double.isFinite(value) && value >= 0.01) {
-                    budget = value;
-                    System.out.printf("Budget set to $%.2f.%n", budget);
-                    reportBudget();
-                    save();
-                    return;
-                }
-            }
-            catch (NumberFormatException e) {
-                // Invalid text is handled by the message below.
             }
             System.out.println(
-                "Budget must be a positive number (or 0 for none). Try again.");
+                "Budget must be a positive amount like 40 or 25.50 (or 'off').");
         }
     }
 
-    /** True while a challenge is running and has not been graded yet. */
-    private boolean challengeActive() {
-        return activeChallenge != null && !challengeDone;
+    /** "budget" alone opens the screen; "budget 40" and "budget off" work too. */
+    private void budgetCommand(String rest) {
+        if (rest.isEmpty()) {
+            budgetScreen();
+        }
+        else if (!applyBudget(rest)) {
+            System.out.println(
+                "Budget must be a positive amount like 40 or 25.50 (or 'off').");
+        }
     }
+
+    private boolean applyBudget(String text) {
+        String t = text.trim().toLowerCase();
+        if (t.startsWith("$")) {
+            t = t.substring(1).trim();
+        }
+        if (t.equals("off") || t.equals("none") || t.equals("clear")
+            || t.equals("0")) {
+            budgetCents = 0;
+            System.out.println("Budget removed.");
+            save();
+            return true;
+        }
+        try {
+            double value = Double.parseDouble(t);
+            if (Double.isFinite(value) && value >= 0.01 && value <= MAX_BUDGET) {
+                budgetCents = cents(value);
+                System.out.printf("Budget set to %s.%n", money(budgetCents));
+                reportBudget();
+                save();
+                return true;
+            }
+        }
+        catch (NumberFormatException e) {
+            // Invalid text is handled by the caller.
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // Challenges and the scoring rubric
+    // ------------------------------------------------------------------
 
     private static String letterGrade(int score) {
         if (score >= 90) return "A";
@@ -750,199 +1585,513 @@ public class GroceryApp {
         return "F";
     }
 
-    private void startChallenge() {
-        System.out.println("\n--- Available Challenges ---");
-        for (int i = 0; i < challenges.size(); i++) {
-            ShoppingChallenge challenge = challenges.get(i);
-            String best = bestScores[i] >= 0
-                ? String.format("  [best: %s %d/100]",
-                    letterGrade(bestScores[i]), bestScores[i])
-                : "";
-            System.out.printf("%d. %s - at least %d items, budget $%.2f (%s)%s%n",
-                i + 1, challenge.getName(), challenge.getMinimumItems(),
-                challenge.getMaxBudget(), challenge.getDescription(), best);
-        }
-        System.out.println("0. Back");
-        int choice = readChoice("Choose a challenge: ", 0, challenges.size());
-        if (choice <= 0) {
-            return;
-        }
-        if (!basket.isEmpty()
-            && askYesNo("Start with an empty basket? (y/n): ")) {
-            basket = new GroceryBasket();
-        }
-        activeIndex = choice - 1;
-        activeChallenge = challenges.get(activeIndex);
-        challengeDone = false;
-        challengePassed = false;
-        challengeScore = 0;
-        challengeGrade = "";
-        System.out.println("Challenge started: " + activeChallenge.getName());
-        if (!gradeIfReached()) {
-            reportChallenge();
-        }
-        save();
+    /** True when the basket meets the active challenge's requirements. */
+    private boolean challengeMet() {
+        return activeChallenge != null
+            && basket.getItemCount() >= activeChallenge.getMinimumItems()
+            && totalCents() <= cents(activeChallenge.getMaxBudget());
     }
 
-    /** Grades the challenge as soon as the basket hits its item limit. */
-    private boolean gradeIfReached() {
-        if (!challengeActive()
-            || basket.getItemCount() < activeChallenge.getMinimumItems()) {
-            return false;
+    private boolean lastGradeIsStale() {
+        return lastGrade != null
+            && (lastGrade.itemCount != basket.getItemCount()
+                || lastGrade.spentCents != totalCents());
+    }
+
+    /** Prints progress toward the active challenge after a basket change. */
+    private void reportChallenge(boolean wasMet) {
+        if (activeChallenge == null) {
+            return;
         }
-        gradeChallenge();
+        ShoppingChallenge c = activeChallenge;
+        int need = c.getMinimumItems() - basket.getItemCount();
+        long left = cents(c.getMaxBudget()) - totalCents();
+        if (left < 0) {
+            System.out.printf(
+                "Challenge: you're %s over the challenge budget. "
+                + "Remove something to pass!%n", money(-left));
+        }
+        else if (need > 0) {
+            System.out.printf(
+                "Challenge: %d more %s to go, %s of challenge budget left.%n",
+                need, itemWord(need), money(left));
+        }
+        else if (!wasMet) {
+            System.out.println("Challenge: requirements met! Type 'submit' to "
+                + "get graded, or keep shopping to raise your score.");
+        }
+        else {
+            System.out.println("Challenge: requirements met - type 'submit' "
+                + "when you're happy with your basket.");
+        }
+    }
+
+    private void challengeHub() {
+        while (!exitRequested && !goHome) {
+            if (activeChallenge == null) {
+                int index = pickChallenge();
+                if (index < 0 || !beginChallenge(index)) {
+                    return;
+                }
+                continue;
+            }
+            header("CHALLENGE: " + activeChallenge.getName().toUpperCase());
+            printChallengeCard();
+            System.out.println(rule());
+            System.out.println(" 1) See score breakdown (preview, not submitted)");
+            System.out.println(" 2) Submit for grading");
+            System.out.println(" 3) Switch to a different challenge");
+            System.out.println(" 4) Abandon this challenge");
+            System.out.println(" 5) Keep shopping");
+            System.out.println(" 0) Back");
+            int choice = readNumber("Choose: ", 0, 5);
+            switch (choice) {
+                case 1:
+                    previewRubric();
+                    break;
+                case 2:
+                    submitChallenge();
+                    break;
+                case 3:
+                    int index = pickChallenge();
+                    if (index >= 0) {
+                        beginChallenge(index);
+                    }
+                    break;
+                case 4:
+                    if (abandonChallenge()) {
+                        return;
+                    }
+                    break;
+                case 5:
+                    browseAisles();
+                    break;
+                default:
+                    return;
+            }
+        }
+    }
+
+    /** Lists the challenges. Returns the chosen index, or -1 for none. */
+    private int pickChallenge() {
+        header("CHOOSE A CHALLENGE");
+        for (int i = 0; i < challenges.size(); i++) {
+            ShoppingChallenge c = challenges.get(i);
+            System.out.printf(" %d) %-13s %s%n", i + 1, c.getName(),
+                c.getDescription());
+            String best = bestScores[i] >= 0
+                ? "   Best: " + letterGrade(bestScores[i])
+                    + " (" + bestScores[i] + "/100)"
+                : "";
+            System.out.printf("      Buy at least %d items for $%.2f or less.%s%n",
+                c.getMinimumItems(), c.getMaxBudget(), best);
+        }
+        System.out.println(" 0) Back");
+        int choice = readNumber("Choose a challenge: ", 0, challenges.size());
+        return choice - 1;
+    }
+
+    /** Starts a challenge. Returns false if the user cancelled. */
+    private boolean beginChallenge(int index) {
+        if (!basket.isEmpty()) {
+            System.out.printf("You already have %d %s in your basket ($%.2f).%n",
+                basket.getItemCount(), itemWord(basket.getItemCount()),
+                basket.getTotalPrice());
+            System.out.println(" 1) Keep them - they count toward the challenge");
+            System.out.println(" 2) Start with an empty basket (you can 'undo' this)");
+            System.out.println(" 0) Cancel");
+            int keep = readNumber("Choose: ", 0, 2);
+            if (keep <= 0) {
+                return false;
+            }
+            if (keep == 2) {
+                snapshot();
+                basket = new GroceryBasket();
+            }
+        }
+        activeIndex = index;
+        activeChallenge = challenges.get(index);
+        lastGrade = null;
+        System.out.println("Challenge started: " + activeChallenge.getName());
+        reportChallenge(false);
+        save();
         return true;
     }
 
-    private int countCategories() {
-        LinkedChain<String> seen = new LinkedChain<String>();
-        for (GroceryItem item : basket.getItems()) {
-            String key = item.getCategory().trim().toLowerCase();
-            if (!seen.contains(key)) {
-                seen.add(key);
-            }
+    private boolean abandonChallenge() {
+        if (activeChallenge == null) {
+            System.out.println("No challenge is running.");
+            return false;
         }
-        return seen.size();
+        if (!askYesNo("Abandon " + activeChallenge.getName()
+            + "? Your basket stays as it is. (y/n): ")) {
+            System.out.println("Okay, the challenge is still on.");
+            return false;
+        }
+        System.out.println("Challenge abandoned. Your basket is untouched.");
+        activeChallenge = null;
+        activeIndex = -1;
+        lastGrade = null;
+        save();
+        return true;
     }
 
-    /**
-     * Scores the basket out of 100: 60 for staying within budget, up to 20
-     * for money left over, and up to 20 for variety (5 per category).
-     */
-    private void gradeChallenge() {
+    private void printChallengeCard() {
         ShoppingChallenge c = activeChallenge;
-        double total = basket.getTotalPrice();
-        boolean passed = c.isCompleted(basket);
-
-        int budgetPoints = passed ? 60 : 0;
-        int savingsPoints = 0;
-        if (passed) {
-            savingsPoints = (int)Math.round(
-                20.0 * (c.getMaxBudget() - total) / c.getMaxBudget());
-            savingsPoints = Math.max(0, Math.min(20, savingsPoints));
+        System.out.println(" " + c.getDescription());
+        System.out.printf(" Goal:      at least %d items for $%.2f or less%n",
+            c.getMinimumItems(), c.getMaxBudget());
+        System.out.printf(" Graded on: items %d | in budget %d | savings %d"
+            + " | variety %d%n",
+            ITEM_POINTS, BUDGET_POINTS, SAVINGS_POINTS, VARIETY_POINTS);
+        System.out.printf(" Right now: %d/%d items | %s of %s%n",
+            basket.getItemCount(), c.getMinimumItems(), money(totalCents()),
+            money(cents(c.getMaxBudget())));
+        if (lastGrade != null) {
+            System.out.printf(" Last submitted: %s (%d/100)%s%n", lastGrade.letter,
+                lastGrade.score, lastGradeIsStale() ? " - basket has changed" : "");
         }
-        int categories = countCategories();
-        int varietyPoints = Math.min(20, categories * 5);
-        int score = budgetPoints + savingsPoints + varietyPoints;
-        String grade = letterGrade(score);
+        if (bestScores[activeIndex] >= 0) {
+            System.out.printf(" Best: %s (%d/100)%n",
+                letterGrade(bestScores[activeIndex]), bestScores[activeIndex]);
+        }
+    }
 
-        System.out.println("\n==============================");
-        System.out.println("  CHALLENGE GRADE: " + c.getName());
-        System.out.println("==============================");
-        System.out.printf("Items:  %d (needed %d)%n",
-            basket.getItemCount(), c.getMinimumItems());
-        System.out.printf("Spent:  $%.2f of $%.2f%n", total, c.getMaxBudget());
-        System.out.printf("Stay within budget ..... %2d/60%n", budgetPoints);
-        System.out.printf("Savings bonus .......... %2d/20%n", savingsPoints);
-        System.out.printf("Variety bonus .......... %2d/20 (%d %s)%n",
-            varietyPoints, categories,
-            categories == 1 ? "category" : "categories");
-        System.out.println("------------------------------");
-        System.out.printf("Score: %d/100   Grade: %s%n", score, grade);
-        if (passed) {
-            System.out.println("Challenge completed! Great job!");
-            if (score > bestScores[activeIndex]) {
-                if (bestScores[activeIndex] >= 0) {
-                    System.out.println("New personal best!");
+    /** Distinct basket categories, in the order they first appear. */
+    private LinkedChain<String> distinctCategories() {
+        LinkedChain<String> names = new LinkedChain<String>();
+        LinkedChain<String> keys = new LinkedChain<String>();
+        for (int i = 0; i < basket.getItemCount(); i++) {
+            GroceryItem item = basket.getItem(i);
+            String name = item.getCategory().trim();
+            String key = name.toLowerCase();
+            if (!keys.contains(key)) {
+                keys.addToEnd(key);
+                names.addToEnd(name);
+            }
+        }
+        return names;
+    }
+
+    /** Scores the basket against a challenge. */
+    private Grade computeGrade(ShoppingChallenge c) {
+        Grade g = new Grade();
+        int count = basket.getItemCount();
+        long spent = totalCents();
+        long max = cents(c.getMaxBudget());
+        boolean itemsMet = count >= c.getMinimumItems();
+        boolean within = spent <= max;
+        g.itemCount = count;
+        g.spentCents = spent;
+        g.passed = itemsMet && within;
+        g.itemPoints = itemsMet ? ITEM_POINTS
+            : (int)Math.round((double)ITEM_POINTS * count / c.getMinimumItems());
+        g.budgetPoints = g.passed ? BUDGET_POINTS : 0;
+        if (g.passed) {
+            int savings = (int)Math.round(
+                (double)SAVINGS_POINTS * (max - spent) / max);
+            g.savingsPoints = Math.max(0, Math.min(SAVINGS_POINTS, savings));
+        }
+        g.categories = distinctCategories().size();
+        g.varietyPoints = Math.min(VARIETY_POINTS,
+            g.categories * POINTS_PER_CATEGORY);
+        g.score = g.itemPoints + g.budgetPoints + g.savingsPoints
+            + g.varietyPoints;
+        g.letter = letterGrade(g.score);
+        return g;
+    }
+
+    private void previewRubric() {
+        if (activeChallenge == null) {
+            System.out.println("No challenge is running. Type 'challenge' to pick one.");
+            return;
+        }
+        printRubric(computeGrade(activeChallenge), false);
+    }
+
+    private void submitChallenge() {
+        if (activeChallenge == null) {
+            System.out.println("No challenge is running. Type 'challenge' to pick one.");
+            return;
+        }
+        ShoppingChallenge c = activeChallenge;
+        int need = c.getMinimumItems() - basket.getItemCount();
+        if (need > 0) {
+            System.out.printf("Not ready to submit: you need %d more %s "
+                + "(the minimum is %d).%n", need, itemWord(need),
+                c.getMinimumItems());
+            printRubric(computeGrade(c), false);
+            return;
+        }
+        Grade g = computeGrade(c);
+        if (!g.passed && !askYesNo("You're over the challenge budget, so this "
+            + "will FAIL. Submit anyway? (y/n): ")) {
+            System.out.println("Okay - remove something and submit again.");
+            return;
+        }
+        printRubric(g, true);
+        lastGrade = g;
+        if (g.passed) {
+            System.out.println("  Challenge completed! Great job!");
+            int best = bestScores[activeIndex];
+            if (g.score > best) {
+                if (best >= 0) {
+                    System.out.println("  New personal best!");
                 }
-                bestScores[activeIndex] = score;
+                bestScores[activeIndex] = g.score;
             }
         }
         else {
-            System.out.printf("Challenge failed: over budget by $%.2f.%n",
-                total - c.getMaxBudget());
-            System.out.println(
-                "Start the challenge again from the menu to retry.");
+            System.out.printf("  Challenge failed: over budget by %s.%n",
+                money(g.spentCents - cents(c.getMaxBudget())));
         }
-        challengeDone = true;
-        challengePassed = passed;
-        challengeScore = score;
-        challengeGrade = grade;
+        System.out.println("  Keep shopping and type 'submit' again to improve, "
+            + "or 'challenge' to try another.");
+        save();
     }
 
-    private void checkChallenge() {
-        if (activeChallenge == null) {
-            System.out.println("Start a challenge first.");
-            return;
+    private static String mark(int points, int max) {
+        if (points >= max) {
+            return "x";
         }
-        if (challengeDone) {
-            if (challengePassed) {
-                System.out.printf("Challenge completed! %s - Grade %s (%d/100)%n",
-                    activeChallenge.getName(), challengeGrade, challengeScore);
-            }
-            else {
-                System.out.printf("Challenge failed: %s - Grade %s (%d/100)%n",
-                    activeChallenge.getName(), challengeGrade, challengeScore);
-                System.out.println(
-                    "Start it again from the challenge menu to retry.");
-            }
-            return;
-        }
-        System.out.println("Challenge not completed yet.");
-        System.out.printf("Need at least %d items and a total of $%.2f or less.%n",
-            activeChallenge.getMinimumItems(), activeChallenge.getMaxBudget());
-        System.out.printf("Progress: %d/%d items, $%.2f spent.%n",
-            basket.getItemCount(), activeChallenge.getMinimumItems(),
-            basket.getTotalPrice());
+        return points > 0 ? "~" : " ";
     }
+
+    private void printRubric(Grade g, boolean official) {
+        ShoppingChallenge c = activeChallenge;
+        long max = cents(c.getMaxBudget());
+        boolean itemsMet = g.itemCount >= c.getMinimumItems();
+        System.out.println();
+        System.out.println(fill('=', WIDTH));
+        System.out.println(official
+            ? "  CHALLENGE GRADE: " + c.getName()
+            : "  SCORE PREVIEW: " + c.getName() + " (not submitted)");
+        System.out.println(fill('=', WIDTH));
+
+        System.out.printf("  [%s] %-15s %2d/%-2d  %d of %d items%n",
+            mark(g.itemPoints, ITEM_POINTS), "Item minimum", g.itemPoints,
+            ITEM_POINTS, g.itemCount, c.getMinimumItems());
+
+        String budgetNote;
+        if (g.spentCents > max) {
+            budgetNote = money(g.spentCents) + " of " + money(max)
+                + " - OVER by " + money(g.spentCents - max);
+        }
+        else if (!itemsMet) {
+            budgetNote = money(g.spentCents) + " of " + money(max)
+                + " - counts once you have enough items";
+        }
+        else {
+            budgetNote = money(g.spentCents) + " of " + money(max);
+        }
+        System.out.printf("  [%s] %-15s %2d/%-2d  %s%n",
+            mark(g.budgetPoints, BUDGET_POINTS), "Stay in budget",
+            g.budgetPoints, BUDGET_POINTS, budgetNote);
+
+        String savingsNote = g.passed
+            ? Math.round(100.0 * (max - g.spentCents) / max)
+                + "% of the budget left over"
+            : "unlocks once you pass";
+        System.out.printf("  [%s] %-15s %2d/%-2d  %s%n",
+            mark(g.savingsPoints, SAVINGS_POINTS), "Savings bonus",
+            g.savingsPoints, SAVINGS_POINTS, savingsNote);
+
+        LinkedChain<String> categories = distinctCategories();
+        System.out.printf("  [%s] %-15s %2d/%-2d  %d %s%s%n",
+            mark(g.varietyPoints, VARIETY_POINTS), "Variety bonus",
+            g.varietyPoints, VARIETY_POINTS, g.categories,
+            g.categories == 1 ? "category" : "categories",
+            g.categories == 0 ? "" : " (" + joinNames(categories) + ")");
+
+        System.out.println(rule());
+        System.out.printf("  SCORE: %d/100   GRADE: %s   %s%n", g.score, g.letter,
+            g.passed ? (official ? "PASSED" : "PASSING")
+                : (official ? "FAILED" : "NOT PASSING YET"));
+        printTips(g, c, categories);
+        System.out.println(fill('=', WIDTH));
+    }
+
+    private static String joinNames(LinkedChain<String> names) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < names.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(names.get(i));
+        }
+        return sb.toString();
+    }
+
+    /** Aisles that are not represented in the basket yet (up to a few). */
+    private static String missingAisles(LinkedChain<String> have, int limit) {
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (String aisle : AISLES) {
+            boolean present = false;
+            for (int i = 0; i < have.size(); i++) {
+                if (have.get(i).equalsIgnoreCase(aisle)) {
+                    present = true;
+                }
+            }
+            if (!present && shown < limit) {
+                if (shown > 0) {
+                    sb.append(", ");
+                }
+                sb.append(aisle);
+                shown++;
+            }
+        }
+        return sb.toString();
+    }
+
+    private void printTips(Grade g, ShoppingChallenge c,
+        LinkedChain<String> categories) {
+        LinkedChain<String> tips = new LinkedChain<String>();
+        long max = cents(c.getMaxBudget());
+        int need = c.getMinimumItems() - g.itemCount;
+        if (need > 0) {
+            tips.addToEnd("Add " + need + " more " + itemWord(need)
+                + " to reach the minimum of " + c.getMinimumItems()
+                + " (+" + (ITEM_POINTS - g.itemPoints) + " points, and it "
+                + "unlocks the budget and savings points).");
+        }
+        if (g.spentCents > max) {
+            tips.addToEnd("You're " + money(g.spentCents - max) + " over. "
+                + "Remove about that much (try 'undo' or swap in cheaper items) "
+                + "to earn the " + BUDGET_POINTS + " budget points and pass.");
+        }
+        if (g.varietyPoints < VARIETY_POINTS) {
+            int needed = (VARIETY_POINTS - g.varietyPoints + POINTS_PER_CATEGORY - 1)
+                / POINTS_PER_CATEGORY;
+            String missing = missingAisles(categories, 3);
+            tips.addToEnd("Shop " + needed + " more "
+                + (needed == 1 ? "category" : "categories") + " for +"
+                + (VARIETY_POINTS - g.varietyPoints) + " points"
+                + (missing.isEmpty() ? "." : " (try: " + missing + ")."));
+        }
+        if (g.passed && g.savingsPoints < SAVINGS_POINTS) {
+            tips.addToEnd("Spend less to keep more of the budget: every 5% left "
+                + "over is worth 1 savings point.");
+        }
+        if (g.passed && g.score < 90) {
+            int target = g.score < 70 ? 70 : g.score < 80 ? 80 : 90;
+            String next = letterGrade(target);
+            tips.addToEnd((target - g.score) + " more "
+                + (target - g.score == 1 ? "point" : "points") + " for "
+                + ("A".equals(next) ? "an " : "a ") + next + ".");
+        }
+        System.out.println();
+        if (tips.isEmpty()) {
+            System.out.println("  Perfect basket - nothing left to improve!");
+            return;
+        }
+        System.out.println("  How to improve:");
+        for (int i = 0; i < tips.size(); i++) {
+            System.out.println("   - " + tips.get(i));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Checkout, history, new trip
+    // ------------------------------------------------------------------
 
     private void checkout() {
         if (basket.isEmpty()) {
             System.out.println("Your basket is empty. Add something first.");
             return;
         }
-        System.out.println("\n--- Checkout ---");
-        System.out.println(basket);
-        double subtotal = basket.getTotalPrice();
-        double tax = Math.round(subtotal * TAX_RATE * 100) / 100.0;
-        System.out.printf("Subtotal: $%.2f%n", subtotal);
-        System.out.printf("Estimated tax (%d%%): $%.2f%n",
-            (int)Math.round(TAX_RATE * 100), tax);
-        System.out.printf("Total: $%.2f%n", subtotal + tax);
-        if (budget > 0) {
-            System.out.println(budgetLine());
-            System.out.println("(Budget is tracked before tax.)");
+        if (activeChallenge != null
+            && basket.getItemCount() >= activeChallenge.getMinimumItems()
+            && (lastGrade == null || lastGradeIsStale())) {
+            if (askYesNo("You have a challenge in progress. Grade it before "
+                + "checking out? (y/n): ")) {
+                submitChallenge();
+            }
+            if (exitRequested || goHome) {
+                return;
+            }
         }
+        header("CHECKOUT");
+        printBasketTable(basketLines());
+        long subtotal = totalCents();
+        long tax = Math.round(subtotal * TAX_RATE);
+        System.out.printf("Subtotal: %s%n", money(subtotal));
+        System.out.printf("Estimated tax (%d%%): %s%n",
+            (int)Math.round(TAX_RATE * 100), money(tax));
+        System.out.printf("Total: %s%n", money(subtotal + tax));
+        if (budgetCents > 0) {
+            System.out.println("Budget: " + budgetLine()
+                + "  (tracked before tax)");
+        }
+        String note = "";
         if (activeChallenge != null) {
-            if (challengeDone) {
-                System.out.printf("Challenge %s: %s, Grade %s (%d/100)%n",
-                    activeChallenge.getName(),
-                    challengePassed ? "COMPLETED!" : "failed.",
-                    challengeGrade, challengeScore);
+            if (lastGrade == null) {
+                note = activeChallenge.getName() + ": not submitted";
             }
             else {
-                System.out.println("Challenge " + activeChallenge.getName()
-                    + ": not completed.");
+                note = activeChallenge.getName() + ": " + lastGrade.letter
+                    + " (" + lastGrade.score + "/100)"
+                    + (lastGrade.passed ? "" : " failed");
             }
+            System.out.println("Challenge " + note);
         }
-        if (askYesNo("Complete checkout and exit? (y/n): ")) {
-            System.out.println("Checkout complete. Enjoy your groceries!");
-            resetTrip();
-            exitRequested = true;
+        if (!askYesNo("Complete checkout? (y/n): ")) {
+            System.out.println("Okay, keep shopping.");
+            return;
+        }
+        history.addToEnd(new Order(LocalDate.now().toString(),
+            basket.getItemCount(), subtotal + tax, note));
+        while (history.size() > MAX_HISTORY) {
+            history.remove();
+        }
+        System.out.println("Checkout complete. Enjoy your groceries!");
+        resetTrip();
+        System.out.println("A fresh trip is ready - keep shopping, or type "
+            + "'history' to see your past orders.");
+    }
+
+    private void showHistory() {
+        header("ORDER HISTORY");
+        if (history.isEmpty()) {
+            System.out.println(" No orders yet. Check out to record your first trip.");
         }
         else {
-            System.out.println("Okay, keep shopping.");
+            int number = 1;
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Order order = history.get(i);
+                System.out.printf(" %2d) %s  %2d %-5s $%7.2f  %s%n", number,
+                    order.date, order.items, itemWord(order.items),
+                    order.cents / 100.0, order.note);
+                number++;
+            }
+        }
+        System.out.println(rule());
+        System.out.println(" Challenge records:");
+        for (int i = 0; i < challenges.size(); i++) {
+            System.out.printf("   %-13s %s%n", challenges.get(i).getName(),
+                bestScores[i] >= 0
+                    ? letterGrade(bestScores[i]) + " (" + bestScores[i] + "/100)"
+                    : "not passed yet");
         }
     }
 
-    /** Clears the basket, budget and challenge (best scores are kept). */
+    /** Clears the basket, budget and challenge (history and bests are kept). */
     private void resetTrip() {
         basket = new GroceryBasket();
-        budget = 0;
+        budgetCents = 0;
         activeChallenge = null;
         activeIndex = -1;
-        challengeDone = false;
-        challengePassed = false;
-        challengeScore = 0;
-        challengeGrade = "";
+        lastGrade = null;
+        undoStack.clear();
         save();
     }
 
     private void newTrip() {
-        if (askYesNo(
-            "Clear your basket, budget and challenge and start fresh? (y/n): ")) {
+        if (askYesNo("Clear your basket, budget and challenge and start "
+            + "fresh? (y/n): ")) {
             resetTrip();
-            System.out.println("Fresh start! Your basket is empty.");
+            System.out.println("Fresh start! Your basket is empty "
+                + "(order history and best scores are kept).");
         }
         else {
             System.out.println("Okay, nothing was cleared.");

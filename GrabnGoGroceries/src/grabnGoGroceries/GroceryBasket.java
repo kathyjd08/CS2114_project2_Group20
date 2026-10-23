@@ -8,7 +8,6 @@ public class GroceryBasket {
         items = new LinkedChain<GroceryItem>();
     }
 
-    /** Adds an item. Duplicate items are allowed. */
     public void addItem(GroceryItem item) {
         if (item == null) {
             throw new IllegalArgumentException("Item cannot be null");
@@ -16,17 +15,16 @@ public class GroceryBasket {
         items.addToEnd(item);
     }
 
-    /** Removes one matching copy, or returns false if none is found. */
     public boolean removeItem(GroceryItem item) {
         return items.remove(item);
     }
 
-    /** Finds a stored item by its name, ignoring capitalization. */
     public GroceryItem findByName(String name) {
         if (name == null || name.trim().isEmpty()) {
             return null;
         }
-        for (GroceryItem item : items.toArray(new GroceryItem[items.size()])) {
+        for (int i = 0; i < items.size(); i++) {
+            GroceryItem item = items.get(i);
             if (item.getName() != null
                 && item.getName().equalsIgnoreCase(name.trim())) {
                 return item;
@@ -35,10 +33,34 @@ public class GroceryBasket {
         return null;
     }
 
-public GroceryItem[] getItems() {
-    return items.toArray(new GroceryItem[items.size()]);
-}
+    public GroceryItem getItem(int index) {
+        return items.get(index);
+    }
 
+    public int countOf(GroceryItem item) {
+        return items.count(item);
+    }
+
+    /** Returns a separate chain with the same item references, in order. */
+    public LinkedChain<GroceryItem> snapshotItems() {
+        LinkedChain<GroceryItem> copy = new LinkedChain<GroceryItem>();
+        for (int i = 0; i < items.size(); i++) {
+            copy.addToEnd(items.get(i));
+        }
+        return copy;
+    }
+
+    /** Restores the basket from a chain without sharing its nodes. */
+    public void restoreItems(LinkedChain<GroceryItem> source) {
+        if (source == null) {
+            throw new IllegalArgumentException("Items cannot be null");
+        }
+        LinkedChain<GroceryItem> copy = new LinkedChain<GroceryItem>();
+        for (int i = 0; i < source.size(); i++) {
+            copy.addToEnd(source.get(i));
+        }
+        items = copy;
+    }
 
     public int getItemCount() {
         return items.size();
@@ -46,8 +68,8 @@ public GroceryItem[] getItems() {
 
     public double getTotalPrice() {
         double total = 0;
-        for (GroceryItem item : items.toArray(new GroceryItem[items.size()])) {
-            total += item.getPrice();
+        for (int i = 0; i < items.size(); i++) {
+            total += items.get(i).getPrice();
         }
         return total;
     }
@@ -62,10 +84,9 @@ public GroceryItem[] getItems() {
             return "Basket is empty.";
         }
         StringBuilder listing = new StringBuilder();
-        GroceryItem[] entries = items.toArray(new GroceryItem[items.size()]);
-        for (int i = 0; i < entries.length; i++) {
-            listing.append(i + 1).append(". ").append(entries[i]);
-            if (i < entries.length - 1) {
+        for (int i = 0; i < items.size(); i++) {
+            listing.append(i + 1).append(". ").append(items.get(i));
+            if (i < items.size() - 1) {
                 listing.append(System.lineSeparator());
             }
         }
